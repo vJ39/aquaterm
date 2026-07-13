@@ -2,7 +2,7 @@
 // 魚(種類・成長段階・空腹度・座標・速度)、餌、経過時間を保存する。
 
 use crate::fish::Fish;
-use crate::sim::{Egg, Food, Medicine, Simulation};
+use crate::sim::{Crab, Egg, Food, Medicine, Simulation};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -14,6 +14,12 @@ pub struct SavedState {
     pub medicine: Vec<Medicine>,
     #[serde(default)]
     pub eggs: Vec<Egg>,
+    // 観賞用エンティティ(カニ)。旧セーブには存在しないため #[serde(default)] で空扱いにし、
+    // main.rs 側で ensure_decorative_entities() により補充する。
+    // (旧仕様の大型魚=BigFishは方針転換で廃止。旧セーブに残る "big_fish" キーは
+    // serde が未知フィールドとして無視するだけで安全)
+    #[serde(default)]
+    pub crabs: Vec<Crab>,
     pub elapsed: f64,
 }
 
@@ -47,6 +53,7 @@ pub fn save(sim: &Simulation) -> std::io::Result<()> {
         food: sim.food.clone(),
         medicine: sim.medicine.clone(),
         eggs: sim.eggs.clone(),
+        crabs: sim.crabs.clone(),
         elapsed: sim.elapsed,
     };
     let json = serde_json::to_string_pretty(&state)
@@ -60,5 +67,6 @@ pub fn restore_into(sim: &mut Simulation, state: SavedState) {
     sim.food = state.food;
     sim.medicine = state.medicine;
     sim.eggs = state.eggs;
+    sim.crabs = state.crabs;
     sim.elapsed = state.elapsed;
 }

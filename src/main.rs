@@ -1,7 +1,8 @@
 // aquaterm — aquazone 風の端末熱帯魚育成ツール
 //   crossterm による自前ハーフブロック描画。ratatui は使わない。
 //   起動: 前回状態を ~/.config/aquaterm/state.json から復元(無ければ初期状態)。
-//   キー: f=餌 / m=薬 / p=一時停止 / [ ]=速度 / R=リセット / +,-=増減 / ,=設定 / ?=ヘルプ / q=終了
+//   キー: 矢印=カーソル移動 / f=餌 / m=薬 / t=ガラスを叩く / p=一時停止 / [ ]=速度 / R=リセット /
+//        v=ステータスオーバーレイ表示切替 / s=効果音ON/OFF / a=自動モード / +,-=増減 / S=サメ確定追加 / ,=設定 / ?=ヘルプ / q=終了
 
 mod color;
 mod framebuffer;
@@ -9,8 +10,12 @@ mod fish;
 mod persist;
 mod rng;
 mod sim;
+mod sound;
 
-use color::{lerp, scale, water_gradient, Color, SAND, SAND_DEEP, SICK_TINT};
+use color::{
+    lerp, scale, vitality_color, water_gradient, Color, CURSOR, GAUGE_EMPTY, HUNGRY_FLAG, SAND,
+    SAND_DEEP, SICK_FLAG, SICK_TINT,
+};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyModifiers},
@@ -21,10 +26,10 @@ use crossterm::{
         LeaveAlternateScreen,
     },
 };
-use fish::{Fish, HungerLevel};
+use fish::{crab_sprite, Fish, HungerLevel, Species, Stage};
 use framebuffer::FrameBuffer;
 use rng::Rng;
-use sim::{capacity, sand_height, Simulation};
+use sim::{capacity, clamp_point, sand_height, Simulation};
 use std::io::{Stdout, Write};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
@@ -33,6 +38,16 @@ const TARGET_FPS: u64 = 30;
 // シミュレーション速度の段階(停止相当の低速〜通常〜高速)
 const SPEED_STEPS: [f64; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
 const SPEED_DEFAULT: usize = 2; // = 1.0倍
+// カーソル(照準)を矢印キー1回でどれだけ動かすか(論理ピクセル)
+const CURSOR_STEP: f64 = 2.0;
+// 生命残りゲージのセグメント数(スプライト直上の1行に収まる小さいバー)
+const GAUGE_SEGMENTS: usize = 3;
+// 起動スプラッシュ(タイトルロゴ)を自動で消すまでの時間
+const SPLASH_DURATION: Duration = Duration::from_millis(2200);
+// ステータスオーバーレイの点滅間隔(秒)。常時点灯だと水槽の背景色に埋もれて
+// 見えづらいという実機フィードバックを受けて点滅表示にした。実時間基準(一時停止・
+// 速度倍率の影響を受けない)で切り替える。
+const OVERLAY_BLINK_INTERVAL_SECS: f64 = 0.5;
 
 // 端末サイズの下限。極端に小さい端末(script経由の疑似端末等)でも水槽ロジックが
 // 破綻しないよう、cols/cell_rows にこの最低値を保証する。
@@ -46,12 +61,22 @@ fn sane_size(cols: u16, rows: u16) -> (usize, usize) {
     (cols_u, cell_rows)
 }
 
-// 時間制御・確認プロンプトなどの UI 状態
+// 時間制御・確認プロンプト・カーソル位置などの UI 状態
 struct Ctl {
     paused: bool,
     speed_idx: usize,
     awaiting_reset: bool, // グレートリセットの確認待ち
+    cursor_x: f64,        // 照準カーソルの位置(論理ピクセル)。餌/薬の投下X座標に使う
+    cursor_y: f64,
+    overlay_on: bool, // ステータスオーバーレイ(腹ペコ/病気フラグ・生命ゲージ)表示ON/OFF
+    sfx_on: bool,     // 効果音(SE)のON/OFF
+    auto_on: bool,    // 自動モード(自動餌やり・自動投薬・自動ガラス叩き)のON/OFF。既定OFF
+    settings_on: bool,     // 設定画面(,キー)を開いているか
+    settings_selected: usize, // 設定画面での選択項目インデックス(0..SETTINGS_ITEM_COUNT)
 }
+
+// 設定画面で切り替えられる項目数(効果音・オーバーレイ・自動モード)
+const SETTINGS_ITEM_COUNT: usize = 3;
 
 fn main() {
     if let Err(e) = run() {
@@ -88,7 +113,11 @@ fn run() -> std::io::Result<()> {
     let saved = persist::load();
     let mut help = saved.is_none(); // 初回のみヘルプ自動表示
     match saved {
-        Some(state) => persist::restore_into(&mut sim, state),
+        Some(state) => {
+            persist::restore_into(&mut sim, state);
+            // 旧セーブには観賞用エンティティが無いため、空なら補充する
+            sim.ensure_decorative_entities(fb.pix_width(), fb.pix_height());
+        }
         None => sim.seed_initial(fb.pix_width(), fb.pix_height()),
     }
 
@@ -96,7 +125,25 @@ fn run() -> std::io::Result<()> {
         paused: false,
         speed_idx: SPEED_DEFAULT,
         awaiting_reset: false,
+        // カーソルの初期位置は画面中央
+        cursor_x: fb.pix_width() as f64 / 2.0,
+        cursor_y: fb.pix_height() as f64 / 2.0,
+        overlay_on: true, // 既定は表示ON
+        sfx_on: true,     // 既定は再生ON
+        auto_on: false,   // 既定はOFF(手動操作を邪魔しないため)
+        settings_on: false,
+        settings_selected: 0,
     };
+
+    // 効果音エンジン: オーディオデバイスが無い/初期化失敗でも SoundEngine::new() 自体は
+    // panic せず、以後の play() が静かに無視されるだけになる(内部で握りつぶす)。
+    let sound = sound::SoundEngine::new();
+
+    // 起動スプラッシュ(タイトルロゴ)。毎回の起動時に表示し、キー入力か一定時間で消える。
+    let mut splash = true;
+    let splash_start = Instant::now();
+    // オーバーレイの点滅用(実時間の累計。一時停止・速度倍率の影響を受けない)
+    let mut blink_elapsed: f64 = 0.0;
 
     let frame_budget = Duration::from_millis(1000 / TARGET_FPS);
     let mut last = Instant::now();
@@ -113,6 +160,7 @@ fn run() -> std::io::Result<()> {
                         &mut sim,
                         &mut fb,
                         &mut ctl,
+                        &mut splash,
                         &mut help,
                         &mut running,
                         &mut out,
@@ -122,6 +170,13 @@ fn run() -> std::io::Result<()> {
                     break;
                 }
             }
+        }
+
+        // --- スプラッシュの自動消灯(一定時間経過で消す) ---
+        if splash && splash_start.elapsed() >= SPLASH_DURATION {
+            splash = false;
+            fb.force_full_redraw();
+            queue!(out, Clear(ClearType::All))?;
         }
 
         // --- リサイズ検知 ---
@@ -140,23 +195,47 @@ fn run() -> std::io::Result<()> {
         let now = Instant::now();
         let real_dt = (now - last).as_secs_f64().min(0.1);
         last = now;
-        if !help {
+        // オーバーレイの点滅は実時間基準で常に進める(一時停止中でも点滅は止めない)
+        blink_elapsed += real_dt;
+        if !help && !splash && !ctl.settings_on {
             let sim_dt = if ctl.paused {
                 0.0
             } else {
                 real_dt * SPEED_STEPS[ctl.speed_idx]
             };
             sim.update(sim_dt, fb.pix_width(), fb.pix_height());
+            // 自動モード(aキー)ON中は、自動餌やり・自動投薬・自動ガラス叩きを
+            // sim.update() と同じ時間軸(一時停止・速度倍率も反映)で進める。
+            if ctl.auto_on {
+                sim.update_auto_care(sim_dt, fb.pix_width(), fb.pix_height());
+            }
+
+            // このtickで発生した効果音イベントを再生する(OFF中は消費だけして鳴らさない)
+            if ctl.sfx_on {
+                for ev in sim.sound_events.drain(..) {
+                    sound.play(ev);
+                }
+            } else {
+                sim.sound_events.clear();
+            }
         }
 
         // --- 描画 ---
         // 表示行数は実端末の生値ではなく、下限保証済みの cell_rows から導出する
         // (rows が極端に小さい/0 の場合でも draw_status_bar 側で減算アンダーフローしないため)
         let display_rows = cell_rows + 1;
-        if help {
+        if splash {
+            draw_splash(&mut out, cols_u, display_rows)?;
+        } else if help {
             draw_help(&mut out, cols_u, display_rows)?;
+        } else if ctl.settings_on {
+            draw_settings(&mut out, &ctl, cols_u, display_rows)?;
         } else {
-            render_tank(&mut fb, &sim);
+            // オーバーレイは点滅表示(OVERLAY_BLINK_INTERVAL_SECS 毎にON/OFFを切り替える)。
+            // v キーで非表示にしている間は点滅にかかわらず常に非表示のまま。
+            let blink_phase = (blink_elapsed / OVERLAY_BLINK_INTERVAL_SECS) as u64 % 2 == 0;
+            let overlay_visible = ctl.overlay_on && blink_phase;
+            render_tank(&mut fb, &sim, ctl.cursor_x, ctl.cursor_y, overlay_visible);
             fb.flush(&mut out)?;
             draw_status_bar(&mut out, &sim, &ctl, fb.pix_width(), fb.pix_height(), cols_u, display_rows)?;
             out.flush()?;
@@ -175,10 +254,19 @@ fn handle_key(
     sim: &mut Simulation,
     fb: &mut FrameBuffer,
     ctl: &mut Ctl,
+    splash: &mut bool,
     help: &mut bool,
     running: &mut bool,
     out: &mut Stdout,
 ) -> std::io::Result<()> {
+    // スプラッシュ表示中はどのキーでも閉じる
+    if *splash {
+        *splash = false;
+        fb.force_full_redraw();
+        queue!(out, Clear(ClearType::All))?;
+        return Ok(());
+    }
+
     // ヘルプ表示中はどのキーでも閉じる(以後は自動表示しない)
     if *help {
         *help = false;
@@ -198,6 +286,36 @@ fn handle_key(
         return Ok(());
     }
 
+    // 設定画面: 上下で項目選択、Enter/スペースでトグル、Escで閉じる。
+    // 他のキーは何もしない(誤操作で水槽側の操作に伝わらないようにする)。
+    if ctl.settings_on {
+        match code {
+            KeyCode::Up => {
+                ctl.settings_selected = if ctl.settings_selected == 0 {
+                    SETTINGS_ITEM_COUNT - 1
+                } else {
+                    ctl.settings_selected - 1
+                };
+            }
+            KeyCode::Down => {
+                ctl.settings_selected = (ctl.settings_selected + 1) % SETTINGS_ITEM_COUNT;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => match ctl.settings_selected {
+                0 => ctl.sfx_on = !ctl.sfx_on,
+                1 => ctl.overlay_on = !ctl.overlay_on,
+                2 => ctl.auto_on = !ctl.auto_on,
+                _ => {}
+            },
+            KeyCode::Esc => {
+                ctl.settings_on = false;
+                fb.force_full_redraw();
+                queue!(out, Clear(ClearType::All))?;
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     // Ctrl-C は終了
     if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
         *running = false;
@@ -206,8 +324,49 @@ fn handle_key(
 
     match code {
         KeyCode::Char('q') | KeyCode::Esc => *running = false,
-        KeyCode::Char('f') => sim.feed(fb.pix_width()),
-        KeyCode::Char('m') => sim.medicate(fb.pix_width()),
+        KeyCode::Left => {
+            let (cx, cy) = clamp_point(
+                ctl.cursor_x - CURSOR_STEP,
+                ctl.cursor_y,
+                fb.pix_width(),
+                fb.pix_height(),
+            );
+            ctl.cursor_x = cx;
+            ctl.cursor_y = cy;
+        }
+        KeyCode::Right => {
+            let (cx, cy) = clamp_point(
+                ctl.cursor_x + CURSOR_STEP,
+                ctl.cursor_y,
+                fb.pix_width(),
+                fb.pix_height(),
+            );
+            ctl.cursor_x = cx;
+            ctl.cursor_y = cy;
+        }
+        KeyCode::Up => {
+            let (cx, cy) = clamp_point(
+                ctl.cursor_x,
+                ctl.cursor_y - CURSOR_STEP,
+                fb.pix_width(),
+                fb.pix_height(),
+            );
+            ctl.cursor_x = cx;
+            ctl.cursor_y = cy;
+        }
+        KeyCode::Down => {
+            let (cx, cy) = clamp_point(
+                ctl.cursor_x,
+                ctl.cursor_y + CURSOR_STEP,
+                fb.pix_width(),
+                fb.pix_height(),
+            );
+            ctl.cursor_x = cx;
+            ctl.cursor_y = cy;
+        }
+        KeyCode::Char('f') => sim.feed(ctl.cursor_x, fb.pix_width()),
+        KeyCode::Char('m') => sim.medicate(ctl.cursor_x, fb.pix_width()),
+        KeyCode::Char('t') => sim.knock(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
         KeyCode::Char('p') => {
             ctl.paused = !ctl.paused;
             sim.set_message(if ctl.paused { "一時停止" } else { "再開" });
@@ -227,9 +386,33 @@ fn handle_key(
         KeyCode::Char('R') => {
             ctl.awaiting_reset = true; // 確認プロンプトはステータスバーに出す
         }
+        KeyCode::Char('v') => {
+            ctl.overlay_on = !ctl.overlay_on;
+            sim.set_message(if ctl.overlay_on {
+                "オーバーレイ表示"
+            } else {
+                "オーバーレイ非表示"
+            });
+        }
+        KeyCode::Char('s') => {
+            ctl.sfx_on = !ctl.sfx_on;
+            sim.set_message(if ctl.sfx_on { "効果音ON" } else { "効果音OFF" });
+        }
+        KeyCode::Char('a') => {
+            ctl.auto_on = !ctl.auto_on;
+            sim.set_message(if ctl.auto_on {
+                "自動モードON(自動餌やり/投薬/ガラス叩き)"
+            } else {
+                "自動モードOFF"
+            });
+        }
         KeyCode::Char('+') | KeyCode::Char('=') => sim.add_fish(fb.pix_width(), fb.pix_height()),
+        KeyCode::Char('S') => sim.add_shark(fb.pix_width(), fb.pix_height()),
         KeyCode::Char('-') => sim.remove_fish(),
-        KeyCode::Char(',') => sim.set_message("設定画面は今後対応予定です"),
+        KeyCode::Char(',') => {
+            ctl.settings_on = true;
+            ctl.settings_selected = 0;
+        }
         KeyCode::Char('?') => {
             *help = true;
         }
@@ -254,7 +437,7 @@ fn fish_pixel_color(f: &Fish, dx: usize, dy: usize, base: Color) -> Color {
 }
 
 // 水槽の1フレームをフレームバッファへ描く
-fn render_tank(fb: &mut FrameBuffer, sim: &Simulation) {
+fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: f64, overlay_on: bool) {
     let w = fb.pix_width();
     let h = fb.pix_height();
     let sand_h = sand_height(h);
@@ -280,10 +463,59 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation) {
         }
     }
 
+    // 血の滲み(範囲エフェクト): 捕食位置を中心に、同心円状に赤い波紋が広がっていく
+    // アニメーション。発生から寿命の半分程度は色の濃さを最大近くで維持して
+    // 「数秒間まっか」に見えるようにし、残りの区間で広がりながらフェードアウトする
+    // (「内臓がどろろってなって血が周囲に染み渡る」イメージ)。魚より背面に描く。
+    let stain_tint = Color::new(150, 10, 12);
+    for s in &sim.blood_stains {
+        let progress = (1.0 - s.life / s.max_life).clamp(0.0, 1.0);
+        // 半径は0→最大まで時間経過で広がっていく(同心円が育っていく見た目)
+        let radius = (progress * sim::BLOOD_STAIN_MAX_RADIUS).max(0.6);
+        // 色の濃さ: 保持区間(BLOOD_STAIN_HOLD_FRACTION)まではほぼ最大を維持し、
+        // その後にフェードアウトする
+        let hold = sim::BLOOD_STAIN_HOLD_FRACTION;
+        let intensity = if progress < hold {
+            1.0
+        } else {
+            (1.0 - (progress - hold) / (1.0 - hold)).clamp(0.0, 1.0)
+        };
+        let x0 = (s.x - radius).floor().max(0.0) as usize;
+        let x1 = ((s.x + radius).ceil() as usize).min(w.saturating_sub(1));
+        let y0 = (s.y - radius).floor().max(0.0) as usize;
+        let y1 = ((s.y + radius).ceil() as usize).min(h.saturating_sub(1));
+        for py in y0..=y1 {
+            for px in x0..=x1 {
+                let dx = px as f64 - s.x;
+                let dy = py as f64 - s.y;
+                // 波紋演出と同じく縦を少し潰した楕円にする(half-block解像度の見た目調整)
+                let nx = dx / radius;
+                let ny = dy / (radius * 0.6);
+                let norm_dist = (nx * nx + ny * ny).sqrt();
+                if norm_dist > 1.0 {
+                    continue;
+                }
+                let falloff = 1.0 - norm_dist;
+                let alpha = (falloff * intensity * sim::BLOOD_STAIN_MIX).clamp(0.0, 1.0);
+                if alpha <= 0.02 {
+                    continue;
+                }
+                let base = fb.get_pixel(px, py);
+                fb.set_pixel(px, py, lerp(base, stain_tint, alpha));
+            }
+        }
+    }
+
     // 気泡(魚の後ろ)
     let bubble = Color::new(200, 235, 245);
     for b in &sim.bubbles {
         put(fb, b.x, b.y, bubble, w, h);
+    }
+
+    // カニ(観賞用・水底を歩くだけ。育成ロジック対象外)
+    let crab_y = sand_top as f64 - 1.0;
+    for c in &sim.crabs {
+        draw_sprite(fb, &crab_sprite(), c.x, crab_y, c.facing_right, w, h, |_, _, base| base);
     }
 
     // 卵(水底付近、淡いクリーム色)
@@ -302,26 +534,205 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation) {
         put(fb, md.x, md.y, med_color, w, h);
     }
 
-    // 魚(最前面)
+    // カーソル(照準): 餌・薬はこのX座標付近から投下される
+    draw_cursor(fb, cursor_x, cursor_y, w, h);
+
+    // 投下エフェクト(f/m を押した瞬間に一瞬だけ出る光/波紋)
+    for e in &sim.drop_effects {
+        draw_drop_effect(fb, e, w, h);
+    }
+
+    // 魚(最前面)。成長段階・サメの捕食段階に応じて render_scale() 倍に拡大して描く
+    // (拡大は最近傍サンプリングでスプライトの見た目をそのまま拡大するだけで、
+    // scale==1.0 のときは従来と全く同じ結果になる)。
     for f in &sim.fish {
         let sprite = f.sprite();
-        let left = f.x.round() as isize - (sprite.width as isize) / 2;
-        let top = f.y.round() as isize - (sprite.height as isize) / 2;
-        for &(dx, dy, base) in &sprite.pixels {
-            // 進行方向で左右反転
-            let sx = if f.facing_right {
-                dx as isize
-            } else {
-                sprite.width as isize - 1 - dx as isize
-            };
-            let px = left + sx;
-            let py = top + dy as isize;
-            if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
-                let c = fish_pixel_color(f, dx, dy, base);
-                fb.set_pixel(px as usize, py as usize, c);
+        let grid = sprite_dense(&sprite);
+        let scale = f.render_scale();
+        let out_w = ((sprite.width as f64) * scale).round().max(1.0) as isize;
+        let out_h = ((sprite.height as f64) * scale).round().max(1.0) as isize;
+        let left = f.x.round() as isize - out_w / 2;
+        let top = f.y.round() as isize - out_h / 2;
+        for oy in 0..out_h {
+            for ox in 0..out_w {
+                let sdx = ((ox as f64) / scale).floor() as usize;
+                let sdy = ((oy as f64) / scale).floor() as usize;
+                let sdx = sdx.min(sprite.width.saturating_sub(1));
+                let sdy = sdy.min(sprite.height.saturating_sub(1));
+                // 進行方向で左右反転・死亡演出中は仰向け(上下反転)。出力側のマス目は
+                // そのままに、参照する元ピクセルを反転させることで同じ見た目にする。
+                let src_dx = if f.facing_right {
+                    sdx
+                } else {
+                    sprite.width - 1 - sdx
+                };
+                let src_dy = if f.dead {
+                    sprite.height - 1 - sdy
+                } else {
+                    sdy
+                };
+                if let Some(base) = grid[src_dy * sprite.width + src_dx] {
+                    let px = left + ox;
+                    let py = top + oy;
+                    if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
+                        let c = fish_pixel_color(f, src_dx, src_dy, base);
+                        fb.set_pixel(px as usize, py as usize, c);
+                    }
+                }
             }
         }
+        // ステータスオーバーレイ: スプライト直上(1論理ピクセル上)に腹ペコ/病気フラグと
+        // 生命残りゲージをまとめて表示する(v キーでON/OFF)。拡大表示分の高さも
+        // 踏まえ、拡大後のスプライト上端(top)基準で描く。
+        if overlay_on {
+            draw_status_overlay(fb, f, top, w, h);
+        }
     }
+}
+
+// スプライトの疎な pixels リストを、(dy*width+dx) で引ける密な配列に変換する
+// (拡大描画で最近傍サンプリングする際に使う)。透明部分は None。
+fn sprite_dense(sprite: &fish::Sprite) -> Vec<Option<Color>> {
+    let mut grid = vec![None; sprite.width * sprite.height];
+    for &(dx, dy, c) in &sprite.pixels {
+        if dx < sprite.width && dy < sprite.height {
+            grid[dy * sprite.width + dx] = Some(c);
+        }
+    }
+    grid
+}
+
+// ステータスオーバーレイ: 生命残りゲージ(数セグメントの横棒)+腹ペコ/病気フラグを
+// スプライト直上の1行に描く。画面外にはみ出す分は put() が無視する。
+fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usize, h: usize) {
+    let meter_y = sprite_top as f64 - 1.0;
+    let half = (GAUGE_SEGMENTS as f64 - 1.0) / 2.0;
+
+    // 生命残りゲージ: 元気度に応じて点灯セグメント数を決める(高いほど緑〜黄、低いほど赤)
+    let vit = f.vitality();
+    let lit = ((vit * GAUGE_SEGMENTS as f64).round() as usize).min(GAUGE_SEGMENTS);
+    let gauge_color = vitality_color(vit);
+    for i in 0..GAUGE_SEGMENTS {
+        let gx = f.x + (i as f64 - half);
+        let c = if i < lit { gauge_color } else { GAUGE_EMPTY };
+        put(fb, gx, meter_y, c, w, h);
+    }
+
+    // 腹ペコフラグ: ゲージのすぐ左に、空腹度が「腹ぺこ」閾値以下のときだけ表示
+    if matches!(f.hunger_level(), HungerLevel::Hungry) {
+        put(fb, f.x - half - 1.0, meter_y, HUNGRY_FLAG, w, h);
+    }
+    // 病気フラグ: ゲージのすぐ右に、病気の個体だけ表示(腹ペコフラグとは別の色)
+    if f.sick {
+        put(fb, f.x + half + 1.0, meter_y, SICK_FLAG, w, h);
+    }
+}
+
+// 投下エフェクト(餌/薬を投げた瞬間の光/波紋)を描く。中心の一瞬の光→広がるリングの順で、
+// 1秒未満で消える。餌と薬で色を変え、何をどこに投げたか一目でわかるようにする。
+fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usize) {
+    // 進行度は生成時のlife(max_life)基準で計算する(血飛沫は個体ごとに寿命がばらつくため、
+    // 共通定数ではなく実際の初期値を使わないと進行度がずれる)。
+    let max_life = if e.max_life > 0.0 {
+        e.max_life
+    } else {
+        sim::DROP_EFFECT_LIFETIME
+    };
+    let progress = (1.0 - e.life / max_life).clamp(0.0, 1.0);
+    let color = match e.kind {
+        sim::EffectKind::Food => Color::new(255, 230, 140), // 餌色に近い明るい暖色
+        sim::EffectKind::Medicine => Color::new(170, 255, 190), // 薬色に近い明るい緑
+        sim::EffectKind::Knock => Color::new(215, 225, 235), // ガラスの振動らしい淡い銀白色
+        // サメの捕食時の血飛沫。「内臓がどろろってなって血が周囲に散る」イメージで、
+        // 単色ではなく暗赤・赤黒・ピンク寄りの赤を粒子ごとに固定で割り当てる
+        // (座標から安定的に決めるので、フレームごとに色がチラつかない)。
+        sim::EffectKind::Blood => {
+            let variant = ((e.x * 97.3 + e.y * 53.7).abs() as u64) % 3;
+            match variant {
+                0 => Color::new(150, 0, 8),   // 濃い暗赤
+                1 => Color::new(90, 0, 10),   // 赤黒
+                _ => Color::new(205, 55, 90), // ピンク寄りの赤(内臓っぽさ)
+            }
+        }
+    };
+
+    if e.kind == sim::EffectKind::Blood {
+        // 内臓の破片らしい重量感: 単発の小さい点ではなく、若いうちは塊(隣接ピクセルも
+        // 塗って太らせる)として見せ、時間とともにゆっくり沈み(drift)ながら
+        // 小さく溶けるように消える。
+        let drift_y = progress * 3.0; // ゆっくり沈んでいく
+        let cy = e.y + drift_y;
+        put(fb, e.x, cy, color, w, h);
+        if progress < 0.5 {
+            // 若いうち(寿命の前半)は十字方向にも塗って重たい塊に見せる
+            put(fb, e.x - 1.0, cy, color, w, h);
+            put(fb, e.x + 1.0, cy, color, w, h);
+            put(fb, e.x, cy - 0.6, color, w, h);
+            put(fb, e.x, cy + 0.6, color, w, h);
+        }
+        // ゆったり広がる飛び散り(既存の波紋より遅く・小さく広がる程度に留める)
+        let radius = progress * sim::BLOOD_SPREAD_RADIUS * 0.7;
+        const BLOOD_RING_POINTS: usize = 6;
+        for i in 0..BLOOD_RING_POINTS {
+            let theta = (i as f64) * std::f64::consts::PI * 2.0 / (BLOOD_RING_POINTS as f64);
+            let px = e.x + radius * theta.cos();
+            let py = cy + radius * theta.sin() * 0.6;
+            put(fb, px, py, color, w, h);
+        }
+        return;
+    }
+
+    // 発生直後は中心が一瞬強く光る(Food/Medicine/Knock共通)
+    if progress < 0.35 {
+        put(fb, e.x, e.y, color, w, h);
+    }
+    // 波紋: 半径が時間とともに広がる8方向のリング
+    let radius = progress * sim::DROP_EFFECT_MAX_RADIUS;
+    const RING_POINTS: usize = 8;
+    for i in 0..RING_POINTS {
+        let theta = (i as f64) * std::f64::consts::PI * 2.0 / (RING_POINTS as f64);
+        let px = e.x + radius * theta.cos();
+        // half-block解像度による縦の見た目調整で少し潰した楕円にする
+        let py = e.y + radius * theta.sin() * 0.6;
+        put(fb, px, py, color, w, h);
+    }
+}
+
+// 観賞用エンティティ(大型魚・カニ)のスプライトを、進行方向の左右反転のみ適用して描く。
+// color_fn は (dx, dy, base_color) -> 実際に置く色 (現状は素通しだが将来の色演出用に残す)。
+fn draw_sprite(
+    fb: &mut FrameBuffer,
+    sprite: &fish::Sprite,
+    cx: f64,
+    cy: f64,
+    facing_right: bool,
+    w: usize,
+    h: usize,
+    color_fn: impl Fn(usize, usize, Color) -> Color,
+) {
+    let left = cx.round() as isize - (sprite.width as isize) / 2;
+    let top = cy.round() as isize - (sprite.height as isize) / 2;
+    for &(dx, dy, base) in &sprite.pixels {
+        let sx = if facing_right {
+            dx as isize
+        } else {
+            sprite.width as isize - 1 - dx as isize
+        };
+        let px = left + sx;
+        let py = top + dy as isize;
+        if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
+            fb.set_pixel(px as usize, py as usize, color_fn(dx, dy, base));
+        }
+    }
+}
+
+// カーソル(照準)を小さな十字(プラス形)で描く。魚・背景と被らない専用色。
+fn draw_cursor(fb: &mut FrameBuffer, cx: f64, cy: f64, w: usize, h: usize) {
+    put(fb, cx, cy, CURSOR, w, h);
+    put(fb, cx - 1.0, cy, CURSOR, w, h);
+    put(fb, cx + 1.0, cy, CURSOR, w, h);
+    put(fb, cx, cy - 1.0, CURSOR, w, h);
+    put(fb, cx, cy + 1.0, CURSOR, w, h);
 }
 
 // f64 座標を丸めて範囲内なら1ピクセル置く
@@ -356,13 +767,15 @@ fn draw_status_bar(
         } else {
             format!("x{}", SPEED_STEPS[ctl.speed_idx])
         };
+        let auto = if ctl.auto_on { "ON" } else { "OFF" };
         let base = format!(
-            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  経過 {:02}:{:02}   [f]餌 [m]薬 [p]停止 [[/]]速度 [R]初期化 [?]ヘルプ [q]終了 ",
+            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [t]コンコン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [+/-]増減 [S]サメ [,]設定 [?]ヘルプ [q]終了 ",
             sim.fish_count(),
             cap,
             sim.sick_count(),
             sim.food_count(),
             speed,
+            auto,
             mm,
             ss
         );
@@ -406,42 +819,332 @@ fn fit_width(s: &str, cols: usize) -> String {
     acc
 }
 
-// ヘルプ画面(初回自動表示・? で開閉)
+// タイトルロゴ(この文字列パターンをそのまま使う)。起動スプラッシュとヘルプ画面の両方で使う。
+const LOGO_BLOCK: [&str; 7] = [
+    " ███    ███   █   █   ███   █████  █████  ████   █   █",
+    "█   █  █   █  █   █  █   █    █    █      █   █  ██ ██",
+    "█   █  █   █  █   █  █   █    █    █      █   █  █ █ █",
+    "█████  █   █  █   █  █████    █    ████   ████   █   █",
+    "█   █  █ █ █  █   █  █   █    █    █      █  █   █   █",
+    "█   █  █  █   █   █  █   █    █    █      █   █  █   █",
+    "█   █   ██ █   ███   █   █    █    █████  █   █  █   █",
+];
+const LOGO_SUBTITLE: &str = "        ~~~~  terminal aquarium  ~~~~";
+// ロゴ下部の魚アート(ブロックアート版)
+const LOGO_FISH_ART: [&str; 3] = [
+    "   ▄▄▄▄▖              ▗▄▄▄▄",
+    " ◁█●███▊▔▔      ▔▔▊███●█▷",
+    "   ▀▀▀▀▘              ▝▀▀▀▀",
+];
+// ロゴ全体の行構成を組み立てる(描画にも行数計算にも同じものを使い、食い違いを防ぐ)。
+fn build_logo_lines() -> Vec<(&'static str, (u8, u8, u8))> {
+    let block_color = (200u8, 240u8, 255u8); // 明るい水色〜白
+    let subtitle_color = (120u8, 190u8, 220u8); // 控えめな水色
+    let fish_color = (240u8, 140u8, 20u8); // 金魚オレンジ
+
+    let mut lines: Vec<(&str, (u8, u8, u8))> = Vec::with_capacity(LOGO_BLOCK.len() + LOGO_FISH_ART.len() + 3);
+    for l in LOGO_BLOCK.iter() {
+        lines.push((*l, block_color));
+    }
+    lines.push(("", block_color)); // 空行
+    lines.push((LOGO_SUBTITLE, subtitle_color));
+    lines.push(("", block_color)); // 空行
+    for l in LOGO_FISH_ART.iter() {
+        lines.push((*l, fish_color));
+    }
+    lines
+}
+
+// ロゴの表示に必要な最小幅(最も広い行の表示幅)
+fn logo_width() -> usize {
+    build_logo_lines()
+        .iter()
+        .map(|(text, _)| UnicodeWidthStr::width(*text))
+        .max()
+        .unwrap_or(0)
+}
+
+// ロゴを cols 幅の中央寄せで start_row から描画する。端末が狭すぎて収まらない場合は
+// 何も描かず Ok(0) を返す(小さい端末での panic 防止。実際に描いた行数を返す)。
+fn draw_logo(out: &mut Stdout, cols: usize, rows: usize, start_row: usize) -> std::io::Result<usize> {
+    if rows == 0 || cols < logo_width() {
+        return Ok(0);
+    }
+    let lines = build_logo_lines();
+
+    let mut drawn = 0usize;
+    for (i, (text, (r, g, b))) in lines.iter().enumerate() {
+        let row = start_row + i;
+        if row >= rows {
+            break;
+        }
+        if !text.is_empty() {
+            let w = UnicodeWidthStr::width(*text);
+            let col = if cols > w { (cols - w) / 2 } else { 0 };
+            queue!(
+                out,
+                MoveTo(col as u16, row as u16),
+                Print(format!("\x1b[38;2;{r};{g};{b}m{text}\x1b[0m"))
+            )?;
+        }
+        drawn += 1;
+    }
+    Ok(drawn)
+}
+
+// 起動スプラッシュ画面: タイトルロゴを画面中央に表示する。何かキーを押すか
+// SPLASH_DURATION 経過で消える(main.rs の run() 側で制御)。
+fn draw_splash(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> {
+    queue!(out, Clear(ClearType::All))?;
+    if cols >= logo_width() {
+        let start_row = rows.saturating_sub(build_logo_lines().len()) / 2;
+        draw_logo(out, cols, rows, start_row)?;
+    }
+    out.flush()
+}
+
+// 図鑑(ヘルプ画面の一部): 種類ごとの名前・特徴・実際のドット絵スプライトを並べる。
+// 通常3種(ネオン/金魚/グッピー)+サメが対象。成魚の見た目を使う。
+fn dex_entries() -> Vec<(&'static str, &'static str, Species)> {
+    vec![
+        ("ネオン", "小型・速い・群れやすい", Species::Neon),
+        ("金魚", "大きめ・ゆったり泳ぐ", Species::Goldfish),
+        ("グッピー", "餌への反応が速い", Species::Guppy),
+        ("サメ", "捕食者。Sキーでのみ入手可", Species::Shark),
+    ]
+}
+
+// 図鑑1件分の表示に必要な幅(スプライト幅とラベル幅の大きい方)
+fn dex_entry_width(name: &str, desc: &str, sp: Species) -> usize {
+    let sprite = Fish::new(sp, Stage::Adult, 0.0, 0.0).sprite();
+    let label_w = UnicodeWidthStr::width(format!("{name} — {desc}").as_str());
+    sprite.width.max(label_w)
+}
+
+// 図鑑セクション全体の表示に必要な最小幅(端末が狭い場合のフォールバック判定に使う)
+fn dex_min_width() -> usize {
+    dex_entries()
+        .iter()
+        .map(|(name, desc, sp)| dex_entry_width(name, desc, *sp))
+        .max()
+        .unwrap_or(0)
+}
+
+// 図鑑セクション全体の表示に必要な行数(ラベル1行+スプライト+空行、種類数分)
+fn dex_total_rows() -> usize {
+    dex_entries()
+        .iter()
+        .map(|(_, _, sp)| Fish::new(*sp, Stage::Adult, 0.0, 0.0).sprite().height + 2)
+        .sum()
+}
+
+// 図鑑を start_row から描く。端末が狭すぎる場合は何も描かず Ok(0) を返す
+// (呼び出し側でテキストのみのフォールバック行に切り替える)。
+fn draw_species_dex(
+    out: &mut Stdout,
+    cols: usize,
+    rows: usize,
+    start_row: usize,
+) -> std::io::Result<usize> {
+    if cols < dex_min_width() {
+        return Ok(0);
+    }
+    let mut row = start_row;
+    for (name, desc, sp) in dex_entries() {
+        if row >= rows {
+            break;
+        }
+        let sprite = Fish::new(sp, Stage::Adult, 0.0, 0.0).sprite();
+        let grid = sprite_dense(&sprite);
+        let label = format!("{name} — {desc}");
+        let label_w = UnicodeWidthStr::width(label.as_str());
+        let label_col = if cols > label_w { (cols - label_w) / 2 } else { 0 };
+        queue!(
+            out,
+            MoveTo(label_col as u16, row as u16),
+            Print(format!("\x1b[38;2;220;235;245m{label}\x1b[0m"))
+        )?;
+        row += 1;
+
+        let sprite_col = if cols > sprite.width {
+            (cols - sprite.width) / 2
+        } else {
+            0
+        };
+        for dy in 0..sprite.height {
+            if row >= rows {
+                break;
+            }
+            for dx in 0..sprite.width {
+                if let Some(c) = grid[dy * sprite.width + dx] {
+                    queue!(
+                        out,
+                        MoveTo((sprite_col + dx) as u16, row as u16),
+                        Print(format!("\x1b[38;2;{};{};{}m█\x1b[0m", c.r, c.g, c.b))
+                    )?;
+                }
+            }
+            row += 1;
+        }
+        row += 1; // 種類の間の空行
+    }
+    Ok(row.saturating_sub(start_row))
+}
+
+// ヘルプ画面(初回自動表示・? で開閉)。先頭にタイトルロゴを表示する。
+// 設定画面(,キー): 既存トグル項目(効果音/オーバーレイ/自動モード)を一覧して
+// 上下キーで選択・Enter/スペースで切替できる。端末が狭くても崩れないよう、
+// 行が収まらない分は描かずに済ませる(help画面と同じ考え方)。
+fn draw_settings(out: &mut Stdout, ctl: &Ctl, cols: usize, rows: usize) -> std::io::Result<()> {
+    queue!(out, Clear(ClearType::All))?;
+    let items: [(&str, bool); SETTINGS_ITEM_COUNT] = [
+        ("効果音(SE)", ctl.sfx_on),
+        ("ステータスオーバーレイ", ctl.overlay_on),
+        ("自動モード(自動餌やり/投薬/ガラス叩き)", ctl.auto_on),
+    ];
+    let title = "設定";
+    let hint = "↑↓ 選択  Enter/Space 切替  Esc 閉じる";
+    let total_lines = 2 + items.len() + 2; // title + 空行 + items + 空行 + hint
+    let start_row = rows.saturating_sub(total_lines) / 2;
+
+    let mut row = start_row;
+    let title_w = UnicodeWidthStr::width(title);
+    let title_col = if cols > title_w { (cols - title_w) / 2 } else { 0 };
+    if row < rows {
+        queue!(
+            out,
+            MoveTo(title_col as u16, row.min(rows.saturating_sub(1)) as u16),
+            Print(format!("\x1b[38;2;220;235;245m{title}\x1b[0m"))
+        )?;
+    }
+    row += 2;
+
+    for (i, (label, on)) in items.iter().enumerate() {
+        if row >= rows {
+            break;
+        }
+        let status = if *on { "ON" } else { "OFF" };
+        let marker = if i == ctl.settings_selected { "▶ " } else { "  " };
+        let line = format!("{marker}{label}: {status}");
+        let w = UnicodeWidthStr::width(line.as_str());
+        let col = if cols > w { (cols - w) / 2 } else { 0 };
+        let color = if i == ctl.settings_selected {
+            "\x1b[38;2;255;230;140m" // 選択中は目立つ暖色
+        } else {
+            "\x1b[38;2;220;235;245m"
+        };
+        queue!(
+            out,
+            MoveTo(col as u16, row as u16),
+            Print(format!("{color}{line}\x1b[0m"))
+        )?;
+        row += 1;
+    }
+    row += 1;
+    if row < rows {
+        let w = UnicodeWidthStr::width(hint);
+        let col = if cols > w { (cols - w) / 2 } else { 0 };
+        queue!(
+            out,
+            MoveTo(col as u16, row.min(rows.saturating_sub(1)) as u16),
+            Print(format!("\x1b[38;2;170;190;205m{hint}\x1b[0m"))
+        )?;
+    }
+    out.flush()
+}
+
 fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> {
-    let lines = [
+    let intro_lines = [
         "",
         "  aquaterm — 端末熱帯魚アクアリウム",
         "",
         "  魚に餌をやって育てよう。満腹を保つと成長し、まれに産卵→孵化で増えます。",
-        "  空腹が続いたり過密だと病気になります。薬で治療を。放置すると力尽きます。",
+        "  空腹が続いたり過密だと病気になります。薬で治療を。",
+        "  長く放置すると力尽きて仰向けに浮き、しばらくして水槽から消えます。",
         "",
         "  操作:",
-        "    f          餌やり(中央上部から数粒投下)",
-        "    m          薬を投げる(病気の魚が触れると治癒)",
+        "    矢印キー   カーソル(照準)を移動",
+        "    f          カーソル位置から餌やり",
+        "    m          カーソル位置から薬(病気の魚が触れると治癒)",
+        "    t          ガラスを叩く(近くの魚が驚いて逃げる)",
         "    p          一時停止 / 再開",
         "    [ / ]      シミュレーション速度を下げる / 上げる",
         "    R          水槽グレートリセット(確認あり)",
-        "    + / -      魚を1匹追加 / 間引く",
-        "    ,          設定(将来対応)",
+        "    v          ステータスオーバーレイ(腹ペコ/病気/生命ゲージ)の表示切替",
+        "    s          効果音(SE)のON/OFF",
+        "    a          自動モード(自動餌やり/投薬/ガラス叩き)のON/OFF",
+        "    + / -      魚を1匹追加 / 間引く(ランダムな種類)",
+        "    S          サメを1匹確実に追加(50匹まで)",
+        "    ,          設定画面(効果音/オーバーレイ/自動モードの一覧切替)",
         "    ?          このヘルプを開閉",
         "    q / Esc    終了(状態を保存)",
         "",
-        "  種類: ネオン(青) / 金魚(オレンジ) / グッピー(白+差し色)",
-        "",
-        "  何かキーを押すと水槽に戻ります。",
+    ];
+    // 図鑑が狭い端末で収まらない場合のテキストのみフォールバック行
+    let dex_fallback = [
+        "  種類: ネオン(青) / 金魚(オレンジ) / グッピー(白+差し色) / サメ(灰青・大型)",
+        "  観賞用: カニ(水底を歩く)も泳いでいます",
         "",
     ];
+    let outro_lines = ["  何かキーを押すと水槽に戻ります。", ""];
+
     queue!(out, Clear(ClearType::All))?;
-    let start_row = rows.saturating_sub(lines.len()) / 2;
-    for (i, line) in lines.iter().enumerate() {
+    // ロゴを先頭(上端)に表示し、収まらない端末ではスキップして本文だけ表示する
+    let logo_rows = draw_logo(out, cols, rows, 0)?;
+    let body_start = if logo_rows > 0 { logo_rows + 1 } else { 0 };
+
+    let remaining = rows.saturating_sub(body_start);
+    // 図鑑は幅だけでなく、高さも十分に余っているときだけ使う。片方でも足りない
+    // 端末では、中途半端に描画が欠けるのではなくテキストのみのフォールバックにする。
+    let dex_fits = cols >= dex_min_width()
+        && intro_lines.len() + dex_total_rows() + outro_lines.len() <= remaining;
+    let dex_rows_needed = if dex_fits { dex_total_rows() } else { 0 };
+    let fallback_rows_needed = if dex_fits { 0 } else { dex_fallback.len() };
+    let total_body_len =
+        intro_lines.len() + dex_rows_needed + fallback_rows_needed + outro_lines.len();
+
+    let start_row = body_start + remaining.saturating_sub(total_body_len) / 2;
+
+    let mut row = start_row;
+    for line in intro_lines.iter() {
         let w = UnicodeWidthStr::width(*line);
         let col = if cols > w { (cols - w) / 2 } else { 0 };
-        let r = (start_row + i).min(rows.saturating_sub(1));
+        let r = row.min(rows.saturating_sub(1));
         queue!(
             out,
             MoveTo(col as u16, r as u16),
             Print(format!("\x1b[38;2;220;235;245m{line}\x1b[0m"))
         )?;
+        row += 1;
+    }
+
+    if dex_fits {
+        let drawn = draw_species_dex(out, cols, rows, row)?;
+        row += drawn;
+    } else {
+        for line in dex_fallback.iter() {
+            let w = UnicodeWidthStr::width(*line);
+            let col = if cols > w { (cols - w) / 2 } else { 0 };
+            let r = row.min(rows.saturating_sub(1));
+            queue!(
+                out,
+                MoveTo(col as u16, r as u16),
+                Print(format!("\x1b[38;2;220;235;245m{line}\x1b[0m"))
+            )?;
+            row += 1;
+        }
+    }
+
+    for line in outro_lines.iter() {
+        let w = UnicodeWidthStr::width(*line);
+        let col = if cols > w { (cols - w) / 2 } else { 0 };
+        let r = row.min(rows.saturating_sub(1));
+        queue!(
+            out,
+            MoveTo(col as u16, r as u16),
+            Print(format!("\x1b[38;2;220;235;245m{line}\x1b[0m"))
+        )?;
+        row += 1;
     }
     out.flush()
 }
@@ -464,5 +1167,41 @@ mod tests {
         // 十分な大きさの端末では下限に丸められず、実サイズを反映する(高さは status bar 分 -1)
         assert_eq!(sane_size(80, 24), (80, 23));
         assert_eq!(sane_size(120, 40), (120, 39));
+    }
+
+    // 回帰テスト: ロゴが要求する最小幅を把握しておく(60桁未満ならスキップされる想定の根拠)。
+    // 文字列が将来書き換わって極端に幅が変わった場合に気づけるようにする。
+    #[test]
+    fn logo_width_is_reasonable_and_guards_tiny_terminals() {
+        let w = logo_width();
+        assert!(w > 40, "ロゴはある程度の幅を持つはず: {w}");
+        assert!(w < 200, "ロゴの幅が異常に大きくなっていないか: {w}");
+    }
+
+    // ヘルプ画面の図鑑: 通常3種+サメの4種類を対象にすること
+    #[test]
+    fn dex_entries_cover_all_four_species() {
+        let entries = dex_entries();
+        assert_eq!(entries.len(), 4, "ネオン/金魚/グッピー/サメの4種類のはず");
+        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Neon));
+        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Goldfish));
+        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Guppy));
+        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Shark));
+    }
+
+    // 図鑑の最小幅・必要行数は正の値で、極端に大きくならないこと(狭い端末での
+    // フォールバック判定・レイアウト計算がおかしくなっていないかの回帰テスト)。
+    #[test]
+    fn dex_min_width_and_total_rows_are_reasonable() {
+        let w = dex_min_width();
+        let rows = dex_total_rows();
+        assert!(w > 0 && w < 80, "図鑑の最小幅が異常な値になっていないか: {w}");
+        assert!(
+            rows > 0 && rows < 40,
+            "図鑑の必要行数が異常な値になっていないか: {rows}"
+        );
+        // サメは既存3種より大きいドット絵なので、図鑑の最小幅はサメ単体の幅以上のはず
+        let shark_w = dex_entry_width("サメ", "捕食者。Sキーでのみ入手可", Species::Shark);
+        assert!(w >= shark_w);
     }
 }

@@ -44,3 +44,26 @@ pub fn water_gradient(y_frac: f64) -> Color {
         lerp(WATER_MID, WATER_DEEP, (y_frac - 0.5) / 0.5)
     }
 }
+
+// 元気メーター用のグラデーション色(赤=低 → 黄=中 → 緑=高)
+pub const VITALITY_LOW: Color = Color::new(214, 48, 44); // 赤(瀕死)
+pub const VITALITY_MID: Color = Color::new(232, 198, 46); // 黄(普通)
+pub const VITALITY_HIGH: Color = Color::new(96, 214, 88); // 緑(元気)
+
+// 元気度 t(0.0=瀕死..1.0=満点)から表示色を返す
+pub fn vitality_color(t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        lerp(VITALITY_LOW, VITALITY_MID, t / 0.5)
+    } else {
+        lerp(VITALITY_MID, VITALITY_HIGH, (t - 0.5) / 0.5)
+    }
+}
+
+// カーソル(照準)の色。魚・背景のどの配色とも被らない明るいマゼンタ。
+pub const CURSOR: Color = Color::new(255, 60, 220);
+
+// ステータスオーバーレイ(vキーでON/OFF)用の色
+pub const GAUGE_EMPTY: Color = Color::new(40, 42, 50); // 生命残りゲージの未点灯セグメント
+pub const HUNGRY_FLAG: Color = Color::new(255, 150, 40); // 腹ペコフラグ(琥珀色)
+pub const SICK_FLAG: Color = Color::new(180, 70, 200); // 病気フラグ(紫)

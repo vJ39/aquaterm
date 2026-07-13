@@ -55,6 +55,17 @@ impl FrameBuffer {
         }
     }
 
+    // 既存ピクセル色を読む(血の滲みのように背景色とブレンドする描画で使う)。
+    // 範囲外は黒(初期値)を返す(set_pixelと同じ境界チェックの考え方)。
+    #[inline]
+    pub fn get_pixel(&self, x: usize, y: usize) -> Color {
+        if x < self.cols && y < self.pix_rows {
+            self.pixels[y * self.cols + x]
+        } else {
+            Color::new(0, 0, 0)
+        }
+    }
+
     // diff を stdout に流す。次フレーム用に前状態を更新する。
     pub fn flush<W: Write>(&mut self, out: &mut W) -> std::io::Result<()> {
         for cy in 0..self.cell_rows {

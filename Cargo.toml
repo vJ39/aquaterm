@@ -8,6 +8,9 @@ crossterm = "0.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 unicode-width = "0.1"
+# 効果音: 外部音源(wav/mp3等)は使わず、正弦波を都度合成して再生するだけなので
+# デコーダ類は不要。再生機能(playback)のみを有効にする。
+rodio = { version = "0.22", default-features = false, features = ["playback"] }
 
 [profile.release]
 opt-level = 3
