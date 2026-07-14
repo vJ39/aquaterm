@@ -197,6 +197,12 @@ pub struct Fish {
     pub attract_dx: f64,
     #[serde(default)]
     pub attract_dy: f64,
+    // --- ピラニア専用(他種は使わない。デフォルトのままで無害) ---
+    // 満腹(hunger>=PIRANHA_HUNT_HUNGER_THRESHOLD)になってから捕食した匹数。
+    // PIRANHA_KILLS_TO_FULL に達するまでは、満腹相当の空腹度でも狩りをやめない
+    // (食欲を旺盛にする)。満腹判定が確定した瞬間に0へ戻す。
+    #[serde(default)]
+    pub piranha_meals_since_full: u32,
 }
 
 impl Fish {
@@ -240,6 +246,7 @@ impl Fish {
             attract_timer: 0.0,
             attract_dx: 0.0,
             attract_dy: 0.0,
+            piranha_meals_since_full: 0,
         }
     }
 

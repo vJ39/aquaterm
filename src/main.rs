@@ -73,16 +73,19 @@ struct Ctl {
     cursor_x: f64,        // 照準カーソルの位置(論理ピクセル)。餌/薬の投下X座標に使う
     cursor_y: f64,
     overlay_on: bool, // ステータスオーバーレイ(腹ペコ/病気フラグ・生命ゲージ)表示ON/OFF
-    sfx_on: bool,     // 効果音(SE)のON/OFF
+    sfx_on: bool,     // 効果音(SE)のON/OFF。気泡音(Bubble)は対象外(bubble_sfx_onで別管理)
     auto_on: bool,    // 自動モード(自動餌やり・自動投薬・自動ガラス叩き)のON/OFF。既定OFF
     settings_on: bool,     // 設定画面(,キー)を開いているか
     settings_selected: usize, // 設定画面での選択項目インデックス(0..SETTINGS_ITEM_COUNT)
     day_night_on: bool, // 実際の時刻に応じた昼夜の照明変化のON/OFF。既定ON
     auto_replenish_on: bool, // 自動魚補充(Aキー)のON/OFF。既定OFF。自動モード(aキー)とは別トグル
+    // 実機フィードバック(「バブル音と他SEをトグル分離したい」)対応。気泡が上る音だけ
+    // 他の効果音(sfx_on)とは独立にON/OFFできる。既定ON(従来の常時鳴る挙動を維持)。
+    bubble_sfx_on: bool,
 }
 
-// 設定画面で切り替えられる項目数(効果音・オーバーレイ・自動モード・昼夜連動・自動魚補充)
-const SETTINGS_ITEM_COUNT: usize = 5;
+// 設定画面で切り替えられる項目数(効果音・オーバーレイ・自動モード・昼夜連動・自動魚補充・気泡音)
+const SETTINGS_ITEM_COUNT: usize = 6;
 
 fn main() {
     if let Err(e) = run() {
@@ -141,6 +144,7 @@ fn run() -> std::io::Result<()> {
         settings_selected: 0,
         day_night_on: true, // 既定はON(実際の時刻に応じて自動で明るさが変わる)
         auto_replenish_on: false, // 既定OFF(勝手に増えるのを望まない場合もあるため)
+        bubble_sfx_on: true, // 既定ON(従来の常時鳴る挙動を維持)
     };
 
     // 効果音エンジン: オーディオデバイスが無い/初期化失敗でも SoundEngine::new() 自体は
@@ -226,13 +230,17 @@ fn run() -> std::io::Result<()> {
                 sim.update_auto_replenish(sim_dt, fb.pix_width(), fb.pix_height());
             }
 
-            // このtickで発生した効果音イベントを再生する(OFF中は消費だけして鳴らさない)
-            if ctl.sfx_on {
-                for ev in sim.sound_events.drain(..) {
+            // このtickで発生した効果音イベントを再生する(OFF中は消費だけして鳴らさない)。
+            // 気泡音(Bubble)だけはbubble_sfx_onで独立にON/OFFできる(他のSEはsfx_on)。
+            for ev in sim.sound_events.drain(..) {
+                let enabled = if ev == sim::SfxEvent::Bubble {
+                    ctl.bubble_sfx_on
+                } else {
+                    ctl.sfx_on
+                };
+                if enabled {
                     sound.play(ev);
                 }
-            } else {
-                sim.sound_events.clear();
             }
         }
 
@@ -330,6 +338,7 @@ fn handle_key(
                 2 => ctl.auto_on = !ctl.auto_on,
                 3 => ctl.day_night_on = !ctl.day_night_on,
                 4 => ctl.auto_replenish_on = !ctl.auto_replenish_on,
+                5 => ctl.bubble_sfx_on = !ctl.bubble_sfx_on,
                 _ => {}
             },
             KeyCode::Esc => {
@@ -392,6 +401,8 @@ fn handle_key(
         }
         KeyCode::Char('f') => sim.feed(ctl.cursor_x, fb.pix_width()),
         KeyCode::Char('m') => sim.medicate(ctl.cursor_x, fb.pix_width()),
+        // ピラニア専用の肉餌(自動モードには絶対に組み込まない、キー入力専用の操作)
+        KeyCode::Char('M') => sim.drop_meat(ctl.cursor_x, fb.pix_width()),
         KeyCode::Char('t') => sim.knock(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
         KeyCode::Char('T') => sim.tap_attract(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
         KeyCode::Char('p') => {
@@ -670,6 +681,11 @@ fn render_tank(
     for md in &sim.medicine {
         put(fb, md.x, md.y, med_color, w, h);
     }
+    // 肉餌(ピラニア専用。生肉らしい濃い赤で、餌・薬とはっきり見分けられる色にする)
+    let meat_color = Color::new(190, 40, 40);
+    for mt in &sim.meat {
+        put(fb, mt.x, mt.y, meat_color, w, h);
+    }
 
     // スター(無敵アイテム): キラキラ点滅する十字型。触れた魚が一定時間無敵化する。
     for s in &sim.stars {
@@ -901,6 +917,8 @@ fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usiz
         sim::EffectKind::Spawn => Color::new(255, 245, 190),
         // トントン(Tキー): Knock(淡い銀白色)とは対照的な、優しい印象の暖かいピンク。
         sim::EffectKind::Tap => Color::new(255, 195, 205),
+        // 肉餌(Mキー): 生肉らしい濃い赤身の色にし、餌(暖色)・薬(緑)と見分けられるようにする。
+        sim::EffectKind::Meat => Color::new(200, 60, 60),
     };
 
     if e.kind == sim::EffectKind::Spawn {
@@ -1055,7 +1073,7 @@ fn draw_status_bar(
         // (実機フィードバック「捕食するやつばかりだと魚がいなくなる」対応の新規トグル)。
         let auto_replenish = if ctl.auto_replenish_on { "ON" } else { "OFF" };
         let base = format!(
-            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  補充 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [t]コンコン [T]トントン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [A]補充 [+/-]増減 [S]ピラニア [O]タコ [D]タコつぼ [P]水草 [,]設定 [?]ヘルプ [q]終了 ",
+            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  補充 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [M]肉餌 [t]コンコン [T]トントン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [A]補充 [+/-]増減 [S]ピラニア [O]タコ [D]タコつぼ [P]水草 [,]設定 [?]ヘルプ [q]終了 ",
             sim.fish_count(),
             cap,
             sim.sick_count(),
@@ -1309,6 +1327,7 @@ fn draw_settings(out: &mut Stdout, ctl: &Ctl, cols: usize, rows: usize) -> std::
         ("自動モード(自動餌やり/投薬/ガラス叩き)", ctl.auto_on),
         ("昼夜連動の照明変化", ctl.day_night_on),
         ("自動魚補充(通常魚が減ったら自動追加)", ctl.auto_replenish_on),
+        ("気泡音(効果音とは別トグル)", ctl.bubble_sfx_on),
     ];
     let title = "設定";
     let hint = "↑↓ 選択  Enter/Space 切替  Esc 閉じる";

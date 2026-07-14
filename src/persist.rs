@@ -2,7 +2,7 @@
 // 魚(種類・成長段階・空腹度・座標・速度)、餌、経過時間を保存する。
 
 use crate::fish::Fish;
-use crate::sim::{Crab, Den, Egg, Food, Medicine, Plant, Rock, Seahorse, Shrimp, Simulation, Star};
+use crate::sim::{Crab, Den, Egg, Food, Meat, Medicine, Plant, Rock, Seahorse, Shrimp, Simulation, Star};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -12,6 +12,9 @@ pub struct SavedState {
     pub food: Vec<Food>,
     #[serde(default)]
     pub medicine: Vec<Medicine>,
+    // ピラニア専用の肉餌。旧セーブには存在しないため #[serde(default)] で空扱いにする。
+    #[serde(default)]
+    pub meat: Vec<Meat>,
     #[serde(default)]
     pub eggs: Vec<Egg>,
     // スター(無敵アイテム)。旧セーブには存在しないため #[serde(default)] で空扱いにする。
@@ -74,6 +77,7 @@ pub fn save(sim: &Simulation) -> std::io::Result<()> {
         fish: sim.fish.clone(),
         food: sim.food.clone(),
         medicine: sim.medicine.clone(),
+        meat: sim.meat.clone(),
         eggs: sim.eggs.clone(),
         stars: sim.stars.clone(),
         crabs: sim.crabs.clone(),
@@ -94,6 +98,7 @@ pub fn restore_into(sim: &mut Simulation, state: SavedState) {
     sim.fish = state.fish;
     sim.food = state.food;
     sim.medicine = state.medicine;
+    sim.meat = state.meat;
     sim.eggs = state.eggs;
     sim.stars = state.stars;
     sim.crabs = state.crabs;
@@ -120,6 +125,7 @@ mod tests {
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
+            meat: Vec::new(),
             eggs: Vec::new(),
             stars: Vec::new(),
             crabs: Vec::new(),
@@ -169,6 +175,7 @@ mod tests {
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
+            meat: Vec::new(),
             eggs: Vec::new(),
             stars: Vec::new(),
             crabs: Vec::new(),
@@ -207,6 +214,7 @@ mod tests {
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
+            meat: Vec::new(),
             eggs: Vec::new(),
             stars: Vec::new(),
             crabs: Vec::new(),
@@ -233,6 +241,7 @@ mod tests {
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
+            meat: Vec::new(),
             eggs: Vec::new(),
             stars: vec![Star {
                 x: 15.0,
