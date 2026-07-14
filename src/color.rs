@@ -46,11 +46,11 @@ pub fn water_gradient(y_frac: f64) -> Color {
 }
 
 // 水質が悪化した時の濁った緑〜茶系の色。水質パラメータの可視化に使う。
-pub const MURKY_TINT: Color = Color::new(90, 84, 40);
+// 悪化の最大値を引き上げたのに合わせて、より暗く濁った色にしてある。
+pub const MURKY_TINT: Color = Color::new(70, 60, 25);
 // 水槽の色にpollution_frac(0.0=綺麗..1.0=最悪)に応じて濁った色を混ぜる。
-// 全部混ぜてしまうと水槽が見づらくなりすぎるため、最大でも半分程度までしか
-// 濁らせない(MURKY_MAX_MIX)。
-pub const MURKY_MAX_MIX: f64 = 0.55;
+// 最悪(1.0)ではほぼMURKY_TINT一色になるくらいまで濁らせる(MURKY_MAX_MIX)。
+pub const MURKY_MAX_MIX: f64 = 0.85;
 pub fn apply_murkiness(c: Color, pollution_frac: f64) -> Color {
     let t = pollution_frac.clamp(0.0, 1.0) * MURKY_MAX_MIX;
     lerp(c, MURKY_TINT, t)
@@ -78,6 +78,8 @@ pub const CURSOR: Color = Color::new(255, 60, 220);
 pub const GAUGE_EMPTY: Color = Color::new(40, 42, 50); // 生命残りゲージの未点灯セグメント
 pub const HUNGRY_FLAG: Color = Color::new(255, 150, 40); // 腹ペコフラグ(琥珀色)
 pub const SICK_FLAG: Color = Color::new(180, 70, 200); // 病気フラグ(紫)
+pub const AFFINITY_FLAG: Color = Color::new(255, 130, 170); // なつき度フラグ(ピンク)
+pub const DEAD_FLAG: Color = Color::new(140, 140, 150); // 死亡マーク(生気のない灰色)
 
 // スター(無敵アイテム)取得中の発光エフェクト用の色(明るい金色)
 pub const INVINCIBLE_GLOW_COLOR: Color = Color::new(255, 235, 120);

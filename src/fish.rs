@@ -197,6 +197,14 @@ pub struct Fish {
     pub attract_dx: f64,
     #[serde(default)]
     pub attract_dy: f64,
+    // なつき度(0..=AFFINITY_MAX)。`T`(トントン)に反応するたびに少し上昇し、
+    // 時間経過でゆっくり減衰する。閾値以上でステータスオーバーレイにマークが出る。
+    #[serde(default)]
+    pub affinity: f64,
+    // なつき度上昇のクールダウン(0より大きい間は`T`に反応しても上昇しない。
+    // 連打による瞬時のカンスト防止)。
+    #[serde(default)]
+    pub affinity_cooldown: f64,
     // --- ピラニア専用(他種は使わない。デフォルトのままで無害) ---
     // 満腹(hunger>=PIRANHA_HUNT_HUNGER_THRESHOLD)になってから捕食した匹数。
     // PIRANHA_KILLS_TO_FULL に達するまでは、満腹相当の空腹度でも狩りをやめない
@@ -272,6 +280,8 @@ impl Fish {
             attract_timer: 0.0,
             attract_dx: 0.0,
             attract_dy: 0.0,
+            affinity: 0.0,
+            affinity_cooldown: 0.0,
             piranha_meals_since_full: 0,
             piranha_quota_timer: 0.0,
             hunger_decay_mult: 1.0,

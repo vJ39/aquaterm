@@ -16,7 +16,8 @@ mod sound;
 
 use color::{
     apply_day_night, apply_murkiness, day_brightness, lerp, scale, vitality_color, water_gradient, Color, CURSOR,
-    GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG, SICK_TINT,
+    AFFINITY_FLAG, DEAD_FLAG, GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG,
+    SICK_TINT,
 };
 use chrono::{Local, Timelike};
 use crossterm::{
@@ -58,6 +59,11 @@ const OVERLAY_BLINK_INTERVAL_SECS: f64 = 0.5;
 const MIN_COLS: usize = 10;
 const MIN_CELL_ROWS: usize = 4;
 
+// エビの浮遊表現(見た目のみ・カニとの違いを出す演出)
+const SHRIMP_HOVER_HEIGHT: f64 = 2.5; // 水底からこの高さだけ浮いた位置を基準にする
+const SHRIMP_BOB_AMPLITUDE: f64 = 1.2; // 上下にゆらゆら揺れる振れ幅
+const SHRIMP_BOB_SPEED: f64 = 1.1; // 揺れの角速度(大きいほど速く揺れる)
+
 // 端末の生サイズから、下限を適用した (cols, cell_rows) を計算する
 fn sane_size(cols: u16, rows: u16) -> (usize, usize) {
     let cols_u = (cols as usize).max(MIN_COLS);
@@ -88,7 +94,7 @@ pub(crate) struct Ctl {
 
 // 設定画面で切り替えられる項目数(効果音・オーバーレイ・自動モード・昼夜連動・自動魚補充・
 // 気泡音・通常5種それぞれの生成トグル)
-const SETTINGS_ITEM_COUNT: usize = 12;
+const SETTINGS_ITEM_COUNT: usize = 13;
 
 fn main() {
     if let Err(e) = run() {
@@ -380,6 +386,10 @@ fn handle_key(
                         sim.cycle_feed_amount();
                         true
                     }
+                    12 => {
+                        sim.toggle_crabs(fb.pix_width());
+                        sim.crab_toggle
+                    }
                     _ => false,
                 };
                 if now_on {
@@ -522,6 +532,12 @@ fn handle_key(
         KeyCode::Char('H') => sim.debug_starve_all(),
         // デバッグ用: 産卵可能な同種ペアを即座に交尾成立(ハート+卵)させる
         KeyCode::Char('K') => sim.debug_force_courtship_proximity(fb.pix_width(), fb.pix_height()),
+        // デバッグ用: 水質を0とMAXの間でトグルする
+        KeyCode::Char('J') => sim.debug_toggle_pollution(),
+        // デバッグ用: 生きている個体からランダムに1匹選んで即座に死亡させる
+        KeyCode::Char('X') => sim.debug_kill_random_fish(),
+        // デバッグ用: スター(無敵アイテム)をカーソル位置に確実に投入する
+        KeyCode::Char('Z') => sim.debug_spawn_star(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
         KeyCode::Char(',') => {
             ctl.settings_on = true;
             ctl.settings_selected = 0;
@@ -720,9 +736,12 @@ fn render_tank(
         draw_sprite(fb, &crab_sprite(), c.x, crab_y, c.facing_right, w, h, |_, _, base| base);
     }
 
-    // エビ(観賞用・カニと同じ位置づけ。水底を歩くだけ。育成ロジック対象外)
-    let shrimp_y = sand_top as f64 - 1.0;
+    // エビ(観賞用・カニと同じ横移動ロジックを共有しつつ、見た目だけ水底より少し
+    // 浮いてゆらゆらと上下するようにしている。歩くだけのカニとの見た目の違いを
+    // 出すための表示上の演出で、シミュレーションの状態(Shrimp構造体)は変えない。
     for s in &sim.shrimp {
+        let bob = (sim.elapsed * SHRIMP_BOB_SPEED + s.x * 0.5).sin() * SHRIMP_BOB_AMPLITUDE;
+        let shrimp_y = sand_top as f64 - SHRIMP_HOVER_HEIGHT + bob;
         draw_sprite(fb, &fish::shrimp_sprite(), s.x, shrimp_y, s.facing_right, w, h, |_, _, base| base);
     }
 
@@ -743,19 +762,41 @@ fn render_tank(
         put(fb, e.x, e.y, scale(egg_color, pulse), w, h);
     }
 
-    // 餌(暖色) / 薬(緑系・餌と別色)
+    // 餌(暖色) / 薬(緑系・餌と別色)。水底に着地したものは、点1つだけだと積もって
+    // いる様子が薄く見えるため、着地位置から砂地の表面まで縦に塗って、しっかり
+    // 積もった山として見えるようにする(浮いて沈降中のものは点のままでよい)。
+    let sand_top_f = sand_top as f64;
+    let draw_settled = |fb: &mut FrameBuffer, x: f64, y: f64, color: Color| {
+        let mut py = y;
+        while py <= sand_top_f {
+            put(fb, x, py, color, w, h);
+            py += 1.0;
+        }
+    };
     let food_color = Color::new(236, 214, 150);
     for fd in &sim.food {
-        put(fb, fd.x, fd.y, food_color, w, h);
+        if fd.landed {
+            draw_settled(fb, fd.x, fd.y, food_color);
+        } else {
+            put(fb, fd.x, fd.y, food_color, w, h);
+        }
     }
     let med_color = Color::new(138, 236, 162);
     for md in &sim.medicine {
-        put(fb, md.x, md.y, med_color, w, h);
+        if md.landed {
+            draw_settled(fb, md.x, md.y, med_color);
+        } else {
+            put(fb, md.x, md.y, med_color, w, h);
+        }
     }
     // 肉餌(ピラニア専用。生肉らしい濃い赤で、餌・薬とはっきり見分けられる色にする)
     let meat_color = Color::new(190, 40, 40);
     for mt in &sim.meat {
-        put(fb, mt.x, mt.y, meat_color, w, h);
+        if mt.landed {
+            draw_settled(fb, mt.x, mt.y, meat_color);
+        } else {
+            put(fb, mt.x, mt.y, meat_color, w, h);
+        }
     }
 
     // スター(無敵アイテム): キラキラ点滅する十字型。触れた魚が一定時間無敵化する。
@@ -883,6 +924,13 @@ fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usi
     let meter_y = sprite_top as f64 - 1.0;
     let half = (GAUGE_SEGMENTS as f64 - 1.0) / 2.0;
 
+    if f.dead {
+        // 死亡演出中は満腹・病気等の通常フラグを一切出さず、専用の死亡マークだけを
+        // 表示する(生きているかのような表示のまま放置されるのを防ぐため)。
+        put(fb, f.x, meter_y, DEAD_FLAG, w, h);
+        return;
+    }
+
     // 生命残りゲージ: 元気度に応じて点灯セグメント数を決める(高いほど緑〜黄、低いほど赤)
     let vit = f.vitality();
     let lit = ((vit * GAUGE_SEGMENTS as f64).round() as usize).min(GAUGE_SEGMENTS);
@@ -900,6 +948,10 @@ fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usi
     // 病気フラグ: ゲージのすぐ右に、病気の個体だけ表示(腹ペコフラグとは別の色)
     if f.sick {
         put(fb, f.x + half + 1.0, meter_y, SICK_FLAG, w, h);
+    }
+    // なつき度フラグ: 病気フラグのさらに右に、閾値以上なついている個体だけ表示
+    if f.affinity >= sim::AFFINITY_MARK_THRESHOLD {
+        put(fb, f.x + half + 2.0, meter_y, AFFINITY_FLAG, w, h);
     }
 }
 
@@ -994,6 +1046,8 @@ fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usiz
         sim::EffectKind::Mate => Color::new(255, 110, 160),
         // 孵化(羽化): 生まれたばかりの柔らかい印象の淡い黄緑。
         sim::EffectKind::Hatch => Color::new(200, 240, 160),
+        // カニが亡骸を片付ける瞬間の分解演出。土に還るような、くすんだ灰褐色。
+        sim::EffectKind::Decompose => Color::new(90, 78, 60),
     };
 
     if e.kind == sim::EffectKind::Spawn || e.kind == sim::EffectKind::Mate {
@@ -1028,28 +1082,34 @@ fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usiz
         return;
     }
 
-    if e.kind == sim::EffectKind::Blood {
-        // 内臓の破片らしい重量感: 単発の小さい点ではなく、若いうちは塊(隣接ピクセルも
-        // 塗って太らせる)として見せ、時間とともにゆっくり沈み(drift)ながら
-        // 小さく溶けるように消える。
+    if e.kind == sim::EffectKind::Blood || e.kind == sim::EffectKind::Decompose {
+        // 内臓の破片・分解した破片らしい重量感: 単発の小さい点ではなく、若いうちは塊
+        // (隣接ピクセルも塗って太らせる)として見せ、時間とともにゆっくり沈み
+        // (drift)ながら小さく溶けるように消える。カニによる分解演出(Decompose)は
+        // 血の滲みと同じ仕組みを流用しつつ、より大きく破片が飛び散り、フェード
+        // アウトも加えて「崩れて消えていく」印象を強める。
+        let is_decompose = e.kind == sim::EffectKind::Decompose;
         let drift_y = progress * 3.0; // ゆっくり沈んでいく
         let cy = e.y + drift_y;
-        put(fb, e.x, cy, color, w, h);
+        let fade = if is_decompose { (1.0 - progress).clamp(0.0, 1.0) } else { 1.0 };
+        let c = scale(color, fade);
+        put(fb, e.x, cy, c, w, h);
         if progress < 0.5 {
             // 若いうち(寿命の前半)は十字方向にも塗って重たい塊に見せる
-            put(fb, e.x - 1.0, cy, color, w, h);
-            put(fb, e.x + 1.0, cy, color, w, h);
-            put(fb, e.x, cy - 0.6, color, w, h);
-            put(fb, e.x, cy + 0.6, color, w, h);
+            put(fb, e.x - 1.0, cy, c, w, h);
+            put(fb, e.x + 1.0, cy, c, w, h);
+            put(fb, e.x, cy - 0.6, c, w, h);
+            put(fb, e.x, cy + 0.6, c, w, h);
         }
-        // ゆったり広がる飛び散り(既存の波紋より遅く・小さく広がる程度に留める)
-        let radius = progress * sim::BLOOD_SPREAD_RADIUS * 0.7;
-        const BLOOD_RING_POINTS: usize = 6;
-        for i in 0..BLOOD_RING_POINTS {
-            let theta = (i as f64) * std::f64::consts::PI * 2.0 / (BLOOD_RING_POINTS as f64);
+        // ゆったり広がる飛び散り(Decomposeは血の滲みより一回り大きく広がる)
+        let spread_mult = if is_decompose { 1.4 } else { 0.7 };
+        let radius = progress * sim::BLOOD_SPREAD_RADIUS * spread_mult;
+        const SCATTER_RING_POINTS: usize = 6;
+        for i in 0..SCATTER_RING_POINTS {
+            let theta = (i as f64) * std::f64::consts::PI * 2.0 / (SCATTER_RING_POINTS as f64);
             let px = e.x + radius * theta.cos();
             let py = cy + radius * theta.sin() * 0.6;
-            put(fb, px, py, color, w, h);
+            put(fb, px, py, c, w, h);
         }
         return;
     }
@@ -1476,6 +1536,7 @@ fn draw_settings_panel(
         "餌の量".to_string(),
         sim::FEED_AMOUNT_LABELS[sim.feed_amount].to_string(),
     ));
+    items.push(("カニ".to_string(), on_off(sim.crab_toggle)));
 
     let mut lines: Vec<(String, &str)> = Vec::new();
     lines.push((" 設定".to_string(), fg));
@@ -1524,6 +1585,7 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
         "          + - 追加/間引き / S ピラニア / O タコ / M 肉餌 / D タコつぼ / P 水草",
         "          H 全員空腹に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
+        "          J 水質トグル / X ランダム死亡 / Z スター投入(いずれもデバッグ)",
         "",
     ];
     // 図鑑が狭い端末で収まらない場合のテキストのみフォールバック行
