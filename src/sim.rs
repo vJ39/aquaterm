@@ -87,7 +87,7 @@ pub const SICK_DEATH_TIME: f64 = 630.0;
 // --- 死亡演出パラメータ ---
 pub const DEAD_FLOAT_SPEED: f64 = 5.0; // 死んだ魚が水面近くまで浮上する速度(px/秒)
 pub const DEAD_SURFACE_MARGIN: f64 = 3.0; // 水面からこの位置まで浮いたら静止する
-pub const DEAD_FLOAT_TIME: f64 = 16.0; // 浮いた状態を維持してから水槽から消えるまでの時間
+pub const DEAD_FLOAT_TIME: f64 = 300.0; // 浮いた状態を維持してから水槽から消えるまでの時間(約5分)
 
 // --- 観賞用の追加生物(育成ロジック対象外。カニ・エビ・タツノオトシゴ。
 // 大型魚は Species::Piranha として通常の育成対象に統合された) ---
