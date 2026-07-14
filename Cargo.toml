@@ -10,7 +10,14 @@ serde_json = "1"
 unicode-width = "0.1"
 # 効果音: 外部音源(wav/mp3等)は使わず、正弦波を都度合成して再生するだけなので
 # デコーダ類は不要。再生機能(playback)のみを有効にする。
-rodio = { version = "0.22", default-features = false, features = ["playback"] }
+# 実機フィードバック(「音無しでもクロスコンパイルを通したい」)対応: Linux向け
+# クロスコンパイル環境ではrodioの依存(alsa-sys)がpkg-config経由でALSAを探せず
+# ビルドに失敗することがあるため、optional化してsound featureで切り離せるようにする。
+rodio = { version = "0.22", default-features = false, features = ["playback"], optional = true }
+
+[features]
+default = ["sound"]
+sound = ["rodio"]
 
 [profile.release]
 opt-level = 3

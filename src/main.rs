@@ -2,7 +2,8 @@
 //   crossterm による自前ハーフブロック描画。ratatui は使わない。
 //   起動: 前回状態を ~/.config/aquaterm/state.json から復元(無ければ初期状態)。
 //   キー: 矢印=カーソル移動 / f=餌 / m=薬 / t=ガラスを叩く / p=一時停止 / [ ]=速度 / R=リセット /
-//        v=ステータスオーバーレイ表示切替 / s=効果音ON/OFF / a=自動モード / +,-=増減 / S=サメ確定追加 / ,=設定 / ?=ヘルプ / q=終了
+//        v=ステータスオーバーレイ表示切替 / s=効果音ON/OFF / a=自動モード / +,-=増減 /
+//        S=ピラニア確定追加 / O=タコ確定追加 / D=タコつぼ再配置 / P=藻・水草再配置 / ,=設定 / ?=ヘルプ / q=終了
 
 mod color;
 mod framebuffer;
@@ -13,8 +14,8 @@ mod sim;
 mod sound;
 
 use color::{
-    lerp, scale, vitality_color, water_gradient, Color, CURSOR, GAUGE_EMPTY, HUNGRY_FLAG, SAND,
-    SAND_DEEP, SICK_FLAG, SICK_TINT,
+    lerp, scale, vitality_color, water_gradient, Color, CURSOR, GAUGE_EMPTY, HUNGRY_FLAG,
+    INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG, SICK_TINT,
 };
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -29,14 +30,15 @@ use crossterm::{
 use fish::{crab_sprite, Fish, HungerLevel, Species, Stage};
 use framebuffer::FrameBuffer;
 use rng::Rng;
-use sim::{capacity, clamp_point, sand_height, Simulation};
+use sim::{capacity, clamp_point, sand_height, Simulation, Star};
 use std::io::{Stdout, Write};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 const TARGET_FPS: u64 = 30;
 // シミュレーション速度の段階(停止相当の低速〜通常〜高速)
-const SPEED_STEPS: [f64; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
+// 実機フィードバック(「もっと速く進めたい」)を受けて最大4倍→16倍まで拡張した。
+const SPEED_STEPS: [f64; 7] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
 const SPEED_DEFAULT: usize = 2; // = 1.0倍
 // カーソル(照準)を矢印キー1回でどれだけ動かすか(論理ピクセル)
 const CURSOR_STEP: f64 = 2.0;
@@ -188,6 +190,9 @@ fn run() -> std::io::Result<()> {
             cols_u = new_cols_u;
             cell_rows = new_cell_rows;
             fb.resize(cols_u, cell_rows);
+            // 端末サイズ(フォントサイズ)変更で水底の位置がずれるため、タコつぼ・
+            // 水草の座標を新しい水底に合わせて再計算する(実機フィードバック対応)
+            sim.resync_seabed_decor(fb.pix_width(), fb.pix_height());
             queue!(out, Clear(ClearType::All))?;
         }
 
@@ -407,7 +412,10 @@ fn handle_key(
             });
         }
         KeyCode::Char('+') | KeyCode::Char('=') => sim.add_fish(fb.pix_width(), fb.pix_height()),
-        KeyCode::Char('S') => sim.add_shark(fb.pix_width(), fb.pix_height()),
+        KeyCode::Char('S') => sim.add_piranha(fb.pix_width(), fb.pix_height()),
+        KeyCode::Char('O') => sim.add_octopus(fb.pix_width(), fb.pix_height()),
+        KeyCode::Char('D') => sim.reposition_dens(fb.pix_width(), fb.pix_height()),
+        KeyCode::Char('P') => sim.reposition_plants(fb.pix_width(), fb.pix_height()),
         KeyCode::Char('-') => sim.remove_fish(),
         KeyCode::Char(',') => {
             ctl.settings_on = true;
@@ -432,6 +440,13 @@ fn fish_pixel_color(f: &Fish, dx: usize, dy: usize, base: Color) -> Color {
         if (dx + dy) % 2 == 0 {
             c = scale(c, 0.68); // まだら(市松状に減光)
         }
+    }
+    if f.is_invincible() {
+        // スター(無敵アイテム)取得中: 光る/点滅するエフェクトで通常状態と見分けられる
+        // ようにする。invincible_timer自体は時間経過で減っていく値なので、そのまま
+        // 明滅の位相として使えば追加の時刻引き渡しなしに点滅させられる。
+        let blink = ((f.invincible_timer * sim::INVINCIBLE_BLINK_FREQ).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+        c = lerp(c, INVINCIBLE_GLOW_COLOR, 0.25 + 0.45 * blink);
     }
     c
 }
@@ -463,47 +478,79 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
         }
     }
 
+    // 藻・水草(装飾。育成ロジックには参加しない静的オブジェクト。ゆらゆら揺れるだけ)。
+    // 実機フィードバック(「魚が隠れられるくらい大きく」)対応: 単一の細い茎ではなく、
+    // 複数の茎を束ねた「株」として描くことで、魚がすっぽり収まる大きさの茂みに見せる。
+    // 先端ほど大きく揺れるようにして、水中で揺らめく感じを出す。
+    let plant_color = Color::new(55, 145, 75);
+    let plant_color_dark = Color::new(38, 118, 60); // 奥の茎(重なりの奥行き表現)
+    for p in &sim.plants {
+        let segs = p.height.round().max(2.0) as usize;
+        // 束になった茎(株)を数本、根元のx位置をずらして描く。茎ごとに位相・高さ・
+        // 揺れの速さを少しずつずらすことで、まとまって見えつつも一体感のある茂みになる。
+        for (blade_i, &blade_dx) in [-2.0, -1.0, 0.0, 1.0, 2.0].iter().enumerate() {
+            let blade_phase = p.phase + blade_i as f64 * 0.9;
+            let blade_segs = ((segs as f64) * (0.75 + 0.08 * blade_i as f64)).round().max(2.0) as usize;
+            let color = if blade_i % 2 == 0 { plant_color } else { plant_color_dark };
+            for seg in 0..blade_segs {
+                let t = seg as f64 / blade_segs as f64; // 0(根元)〜1(先端側)
+                let sway = (sim.elapsed * sim::PLANT_SWAY_FREQ + blade_phase).sin() * t * 1.6;
+                put(fb, p.x + blade_dx + sway, p.y - seg as f64, color, w, h);
+            }
+        }
+    }
+
+    // 岩(装飾+隠れ場所)。藻・水草と同様、近くにいる魚が視覚的に隠れられる大きさの
+    // 静的オブジェクト。
+    for r in &sim.rocks {
+        draw_sprite(fb, &fish::rock_sprite(), r.x, r.y, true, w, h, |_, _, base| base);
+    }
+
+    // タコつぼ(装飾+タコの巣)
+    for d in &sim.dens {
+        draw_sprite(fb, &fish::den_sprite(), d.x, d.y, true, w, h, |_, _, base| base);
+    }
+
     // 血の滲み(範囲エフェクト): 捕食位置を中心に、同心円状に赤い波紋が広がっていく
     // アニメーション。発生から寿命の半分程度は色の濃さを最大近くで維持して
     // 「数秒間まっか」に見えるようにし、残りの区間で広がりながらフェードアウトする
     // (「内臓がどろろってなって血が周囲に染み渡る」イメージ)。魚より背面に描く。
     let stain_tint = Color::new(150, 10, 12);
     for s in &sim.blood_stains {
-        let progress = (1.0 - s.life / s.max_life).clamp(0.0, 1.0);
-        // 半径は0→最大まで時間経過で広がっていく(同心円が育っていく見た目)
-        let radius = (progress * sim::BLOOD_STAIN_MAX_RADIUS).max(0.6);
-        // 色の濃さ: 保持区間(BLOOD_STAIN_HOLD_FRACTION)まではほぼ最大を維持し、
-        // その後にフェードアウトする
-        let hold = sim::BLOOD_STAIN_HOLD_FRACTION;
-        let intensity = if progress < hold {
-            1.0
-        } else {
-            (1.0 - (progress - hold) / (1.0 - hold)).clamp(0.0, 1.0)
-        };
-        let x0 = (s.x - radius).floor().max(0.0) as usize;
-        let x1 = ((s.x + radius).ceil() as usize).min(w.saturating_sub(1));
-        let y0 = (s.y - radius).floor().max(0.0) as usize;
-        let y1 = ((s.y + radius).ceil() as usize).min(h.saturating_sub(1));
-        for py in y0..=y1 {
-            for px in x0..=x1 {
-                let dx = px as f64 - s.x;
-                let dy = py as f64 - s.y;
-                // 波紋演出と同じく縦を少し潰した楕円にする(half-block解像度の見た目調整)
-                let nx = dx / radius;
-                let ny = dy / (radius * 0.6);
-                let norm_dist = (nx * nx + ny * ny).sqrt();
-                if norm_dist > 1.0 {
-                    continue;
-                }
-                let falloff = 1.0 - norm_dist;
-                let alpha = (falloff * intensity * sim::BLOOD_STAIN_MIX).clamp(0.0, 1.0);
-                if alpha <= 0.02 {
-                    continue;
-                }
-                let base = fb.get_pixel(px, py);
-                fb.set_pixel(px, py, lerp(base, stain_tint, alpha));
-            }
-        }
+        draw_spreading_stain(
+            fb,
+            s.x,
+            s.y,
+            s.life,
+            s.max_life,
+            sim::BLOOD_STAIN_GROWTH_TIME,
+            sim::BLOOD_STAIN_MAX_RADIUS,
+            sim::BLOOD_STAIN_HOLD_FRACTION,
+            sim::BLOOD_STAIN_MIX,
+            stain_tint,
+            w,
+            h,
+        );
+    }
+
+    // 墨(タコが吐く): 血の滲みと同じ「同心円状に広がってフェードアウトする」構造を
+    // 再利用しつつ、血より広め・勢いよく(速く)拡散する黒っぽい色で描く。
+    let ink_tint = Color::new(18, 16, 20);
+    for c in &sim.ink_clouds {
+        draw_spreading_stain(
+            fb,
+            c.x,
+            c.y,
+            c.life,
+            c.max_life,
+            sim::INK_GROWTH_TIME,
+            sim::INK_MAX_RADIUS,
+            sim::INK_HOLD_FRACTION,
+            sim::INK_MIX,
+            ink_tint,
+            w,
+            h,
+        );
     }
 
     // 気泡(魚の後ろ)
@@ -534,6 +581,11 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
         put(fb, md.x, md.y, med_color, w, h);
     }
 
+    // スター(無敵アイテム): キラキラ点滅する十字型。触れた魚が一定時間無敵化する。
+    for s in &sim.stars {
+        draw_star(fb, s, sim.elapsed, w, h);
+    }
+
     // カーソル(照準): 餌・薬はこのX座標付近から投下される
     draw_cursor(fb, cursor_x, cursor_y, w, h);
 
@@ -542,10 +594,31 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
         draw_drop_effect(fb, e, w, h);
     }
 
-    // 魚(最前面)。成長段階・サメの捕食段階に応じて render_scale() 倍に拡大して描く
+    // 魚(最前面)。成長段階・ピラニアの捕食段階に応じて render_scale() 倍に拡大して描く
     // (拡大は最近傍サンプリングでスプライトの見た目をそのまま拡大するだけで、
     // scale==1.0 のときは従来と全く同じ結果になる)。
     for f in &sim.fish {
+        if f.hidden {
+            // タコつぼに隠れている間は姿が見えない(タコの節を参照)
+            continue;
+        }
+        // 藻・水草・岩の近くにいるほど「隠れている」表現にする(背景色へ寄せてなじませる)。
+        // ピラニアから逃げる魚が隠れ場所に逃げ込む使われ方を想定した見た目の効果。
+        // 実機フィードバック(「隠れたら実際に捕食されなくなる機能化」)対応で、この
+        // 見た目の演出と同じ距離判定(is_hidden_in_cover/ALGAE_HIDE_RADIUS)を
+        // 捕食ロジック側でも使っているため、見た目と実際の安全地帯が一致している。
+        let nearest_cover_dist = sim
+            .plants
+            .iter()
+            .map(|p| ((p.x - f.x).powi(2) + (p.y - f.y).powi(2)).sqrt())
+            .chain(
+                sim.rocks
+                    .iter()
+                    .map(|r| ((r.x - f.x).powi(2) + (r.y - f.y).powi(2)).sqrt()),
+            )
+            .fold(f64::INFINITY, f64::min);
+        let hide_alpha = (1.0 - nearest_cover_dist / sim::ALGAE_HIDE_RADIUS).clamp(0.0, 1.0)
+            * sim::ALGAE_HIDE_MIX;
         let sprite = f.sprite();
         let grid = sprite_dense(&sprite);
         let scale = f.render_scale();
@@ -553,6 +626,14 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
         let out_h = ((sprite.height as f64) * scale).round().max(1.0) as isize;
         let left = f.x.round() as isize - out_w / 2;
         let top = f.y.round() as isize - out_h / 2;
+        // タコの足のうねうねアニメーション: 頭部(マント)は静止させたまま、足の部分
+        // (スプライト下側)だけを時間経過でサイン波的に左右へオフセットさせて波打つ
+        // ように見せる。足の付け根から先端に向かうほど振れを大きくする。
+        let octopus_leg_start_row = match (f.species, f.stage) {
+            (Species::Octopus, Stage::Adult) => Some(6),
+            (Species::Octopus, Stage::Fry) => Some(4),
+            _ => None,
+        };
         for oy in 0..out_h {
             for ox in 0..out_w {
                 let sdx = ((ox as f64) / scale).floor() as usize;
@@ -572,10 +653,27 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
                     sdy
                 };
                 if let Some(base) = grid[src_dy * sprite.width + src_dx] {
-                    let px = left + ox;
+                    let wiggle_dx = match octopus_leg_start_row {
+                        Some(leg_start) if !f.dead && sdy >= leg_start => {
+                            let depth = (sdy - leg_start) as f64 + 1.0; // 先端ほど大きく振れる
+                            let leg_phase = (sdx as f64 / sprite.width.max(1) as f64)
+                                * std::f64::consts::TAU
+                                * 2.0; // 足ごとに位相をずらす
+                            let phase = sim.elapsed * sim::OCTOPUS_LEG_WIGGLE_FREQ + leg_phase;
+                            (phase.sin() * depth * sim::OCTOPUS_LEG_WIGGLE_AMPLITUDE * scale)
+                                .round() as isize
+                        }
+                        _ => 0,
+                    };
+                    let px = left + ox + wiggle_dx;
                     let py = top + oy;
                     if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
-                        let c = fish_pixel_color(f, src_dx, src_dy, base);
+                        let mut c = fish_pixel_color(f, src_dx, src_dy, base);
+                        if hide_alpha > 0.0 {
+                            // 藻・水草に隠れている表現: 既にそこに描かれている背景色へ寄せる
+                            let bg = fb.get_pixel(px as usize, py as usize);
+                            c = lerp(c, bg, hide_alpha);
+                        }
                         fb.set_pixel(px as usize, py as usize, c);
                     }
                 }
@@ -630,6 +728,60 @@ fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usi
 
 // 投下エフェクト(餌/薬を投げた瞬間の光/波紋)を描く。中心の一瞬の光→広がるリングの順で、
 // 1秒未満で消える。餌と薬で色を変え、何をどこに投げたか一目でわかるようにする。
+// 同心円状に半径が広がっていき、保持区間の後にフェードアウトして消える範囲エフェクトを
+// 描く汎用ヘルパー。血の滲み・墨の両方で使う(見た目のパラメータだけ変える)。
+// growth_time: 半径が0→maxまで広がるのにかける実時間。hold_fraction: 全体の寿命の
+// うちこの割合までは色の濃さを最大近くで維持する(その後フェードアウト)。
+#[allow(clippy::too_many_arguments)]
+fn draw_spreading_stain(
+    fb: &mut FrameBuffer,
+    cx: f64,
+    cy: f64,
+    life: f64,
+    max_life: f64,
+    growth_time: f64,
+    max_radius: f64,
+    hold_fraction: f64,
+    mix: f64,
+    tint: Color,
+    w: usize,
+    h: usize,
+) {
+    let progress = (1.0 - life / max_life).clamp(0.0, 1.0);
+    let elapsed = (max_life - life).max(0.0);
+    let growth_progress = (elapsed / growth_time).clamp(0.0, 1.0);
+    let radius = (growth_progress * max_radius).max(0.6);
+    let intensity = if progress < hold_fraction {
+        1.0
+    } else {
+        (1.0 - (progress - hold_fraction) / (1.0 - hold_fraction)).clamp(0.0, 1.0)
+    };
+    let x0 = (cx - radius).floor().max(0.0) as usize;
+    let x1 = ((cx + radius).ceil() as usize).min(w.saturating_sub(1));
+    let y0 = (cy - radius).floor().max(0.0) as usize;
+    let y1 = ((cy + radius).ceil() as usize).min(h.saturating_sub(1));
+    for py in y0..=y1 {
+        for px in x0..=x1 {
+            let dx = px as f64 - cx;
+            let dy = py as f64 - cy;
+            // 縦を少し潰した楕円にする(half-block解像度の見た目調整)
+            let nx = dx / radius;
+            let ny = dy / (radius * 0.6);
+            let norm_dist = (nx * nx + ny * ny).sqrt();
+            if norm_dist > 1.0 {
+                continue;
+            }
+            let falloff = 1.0 - norm_dist;
+            let alpha = (falloff * intensity * mix).clamp(0.0, 1.0);
+            if alpha <= 0.02 {
+                continue;
+            }
+            let base = fb.get_pixel(px, py);
+            fb.set_pixel(px, py, lerp(base, tint, alpha));
+        }
+    }
+}
+
 fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usize) {
     // 進行度は生成時のlife(max_life)基準で計算する(血飛沫は個体ごとに寿命がばらつくため、
     // 共通定数ではなく実際の初期値を使わないと進行度がずれる)。
@@ -643,7 +795,7 @@ fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usiz
         sim::EffectKind::Food => Color::new(255, 230, 140), // 餌色に近い明るい暖色
         sim::EffectKind::Medicine => Color::new(170, 255, 190), // 薬色に近い明るい緑
         sim::EffectKind::Knock => Color::new(215, 225, 235), // ガラスの振動らしい淡い銀白色
-        // サメの捕食時の血飛沫。「内臓がどろろってなって血が周囲に散る」イメージで、
+        // ピラニアの捕食時の血飛沫。「内臓がどろろってなって血が周囲に散る」イメージで、
         // 単色ではなく暗赤・赤黒・ピンク寄りの赤を粒子ごとに固定で割り当てる
         // (座標から安定的に決めるので、フレームごとに色がチラつかない)。
         sim::EffectKind::Blood => {
@@ -654,7 +806,33 @@ fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usiz
                 _ => Color::new(205, 55, 90), // ピンク寄りの赤(内臓っぽさ)
             }
         }
+        // 産卵時のキラキラ演出。中心色はここでは使わず(下のSpawn専用分岐で描く)、
+        // 網羅性のためだけに明るい金〜白を割り当てておく。
+        sim::EffectKind::Spawn => Color::new(255, 245, 190),
     };
+
+    if e.kind == sim::EffectKind::Spawn {
+        // 実機フィードバック(「産卵時にキラキラ光るフラッシュ演出」)対応: 生まれた
+        // 卵の位置の周囲に光点をちりばめ、光点ごとに位相をずらして明滅させることで
+        // 「キラキラ」感を出す。寿命が近づくほど全体をフェードアウトさせる。
+        let fade = (1.0 - progress).clamp(0.0, 1.0);
+        const SPARKLE_POINTS: usize = 6;
+        for i in 0..SPARKLE_POINTS {
+            let theta = (i as f64) * std::f64::consts::PI * 2.0 / (SPARKLE_POINTS as f64);
+            let twinkle = ((progress * 14.0 + i as f64 * 1.7).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+            if twinkle < 0.35 {
+                continue; // 明滅で「消えている」瞬間は描かない
+            }
+            let r = 1.5 + 0.8 * (i % 2) as f64;
+            let px = e.x + r * theta.cos();
+            let py = e.y + r * theta.sin() * 0.6;
+            let c = scale(color, fade * (0.6 + 0.4 * twinkle));
+            put(fb, px, py, c, w, h);
+        }
+        // 中心も控えめに光らせる
+        put(fb, e.x, e.y, scale(color, fade * 0.7), w, h);
+        return;
+    }
 
     if e.kind == sim::EffectKind::Blood {
         // 内臓の破片らしい重量感: 単発の小さい点ではなく、若いうちは塊(隣接ピクセルも
@@ -726,6 +904,19 @@ fn draw_sprite(
     }
 }
 
+// スター(無敵アイテム): 十字形の光る点。中心は明るい金色、周囲4点は控えめな輝きで、
+// 時間経過(elapsed+phase)に応じてサイン波で明滅させ「キラキラ」感を出す。
+fn draw_star(fb: &mut FrameBuffer, s: &Star, elapsed: f64, w: usize, h: usize) {
+    let twinkle = ((elapsed * sim::STAR_TWINKLE_FREQ + s.phase).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+    let center = scale(Color::new(255, 235, 120), 0.7 + 0.3 * twinkle);
+    let arm = scale(Color::new(255, 235, 120), 0.35 + 0.35 * twinkle);
+    put(fb, s.x, s.y, center, w, h);
+    put(fb, s.x - 1.0, s.y, arm, w, h);
+    put(fb, s.x + 1.0, s.y, arm, w, h);
+    put(fb, s.x, s.y - 1.0, arm, w, h);
+    put(fb, s.x, s.y + 1.0, arm, w, h);
+}
+
 // カーソル(照準)を小さな十字(プラス形)で描く。魚・背景と被らない専用色。
 fn draw_cursor(fb: &mut FrameBuffer, cx: f64, cy: f64, w: usize, h: usize) {
     put(fb, cx, cy, CURSOR, w, h);
@@ -769,7 +960,7 @@ fn draw_status_bar(
         };
         let auto = if ctl.auto_on { "ON" } else { "OFF" };
         let base = format!(
-            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [t]コンコン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [+/-]増減 [S]サメ [,]設定 [?]ヘルプ [q]終了 ",
+            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [t]コンコン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [+/-]増減 [S]ピラニア [O]タコ [D]タコつぼ [P]水草 [,]設定 [?]ヘルプ [q]終了 ",
             sim.fish_count(),
             cap,
             sim.sick_count(),
@@ -904,13 +1095,32 @@ fn draw_splash(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()
 }
 
 // 図鑑(ヘルプ画面の一部): 種類ごとの名前・特徴・実際のドット絵スプライトを並べる。
-// 通常3種(ネオン/金魚/グッピー)+サメが対象。成魚の見た目を使う。
+// 通常3種(ネオン/金魚/グッピー)+ピラニアが対象。成魚の見た目を使う。
 fn dex_entries() -> Vec<(&'static str, &'static str, Species)> {
     vec![
         ("ネオン", "小型・速い・群れやすい", Species::Neon),
         ("金魚", "大きめ・ゆったり泳ぐ", Species::Goldfish),
         ("グッピー", "餌への反応が速い", Species::Guppy),
-        ("サメ", "捕食者。Sキーでのみ入手可", Species::Shark),
+        ("エンゼルフィッシュ", "縦長で優雅。ゆったり泳ぐ", Species::Angelfish),
+        ("ベタ", "派手なヒレ。単独行動気味", Species::Betta),
+        ("ピラニア", "捕食者。Sキーでのみ入手可", Species::Piranha),
+        ("タコ", "捕食者。つぼに隠れ、時々出てくる。Oキーでも追加可", Species::Octopus),
+    ]
+}
+
+// 図鑑が狭い端末で収まらない場合のテキストのみフォールバック行。
+// dex_entries() に種類を追加/削除したら、こちらも合わせて更新すること
+// (実機フィードバック: 図鑑本体は7種類に対応済みなのに、この文言だけ旧4種のまま
+// 取り残されていたのを見落とした事故があったため、dex_entries_covers_all_species_names
+// のテストで両者の一致を機械的に検証する)。7種類分を1行に収めると幅が長くなりすぎるため、
+// 複数行に分けている。
+fn dex_fallback_lines() -> [&'static str; 5] {
+    [
+        "  種類: ネオン(青) / 金魚(オレンジ) / グッピー(白+差し色)",
+        "        エンゼルフィッシュ(縦長で優雅) / ベタ(派手なヒレ)",
+        "  捕食者: ピラニア(銀色+腹に赤み) / タコ(つぼに隠れ、時々出てくる)",
+        "  観賞用: カニ(水底を歩く)も泳いでいます",
+        "",
     ]
 }
 
@@ -1074,18 +1284,17 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "    s          効果音(SE)のON/OFF",
         "    a          自動モード(自動餌やり/投薬/ガラス叩き)のON/OFF",
         "    + / -      魚を1匹追加 / 間引く(ランダムな種類)",
-        "    S          サメを1匹確実に追加(50匹まで)",
+        "    S          ピラニアを1匹確実に追加(25匹まで)",
+        "    O          タコを1匹確実に追加(25匹まで)",
+        "    D          タコつぼを再配置",
+        "    P          藻・水草を再配置",
         "    ,          設定画面(効果音/オーバーレイ/自動モードの一覧切替)",
         "    ?          このヘルプを開閉",
         "    q / Esc    終了(状態を保存)",
         "",
     ];
     // 図鑑が狭い端末で収まらない場合のテキストのみフォールバック行
-    let dex_fallback = [
-        "  種類: ネオン(青) / 金魚(オレンジ) / グッピー(白+差し色) / サメ(灰青・大型)",
-        "  観賞用: カニ(水底を歩く)も泳いでいます",
-        "",
-    ];
+    let dex_fallback = dex_fallback_lines();
     let outro_lines = ["  何かキーを押すと水槽に戻ります。", ""];
 
     queue!(out, Clear(ClearType::All))?;
@@ -1178,15 +1387,37 @@ mod tests {
         assert!(w < 200, "ロゴの幅が異常に大きくなっていないか: {w}");
     }
 
-    // ヘルプ画面の図鑑: 通常3種+サメの4種類を対象にすること
+    // ヘルプ画面の図鑑: 通常3種+ピラニアの4種類を対象にすること
     #[test]
-    fn dex_entries_cover_all_four_species() {
+    fn dex_entries_cover_all_seven_species() {
         let entries = dex_entries();
-        assert_eq!(entries.len(), 4, "ネオン/金魚/グッピー/サメの4種類のはず");
+        assert_eq!(
+            entries.len(),
+            7,
+            "ネオン/金魚/グッピー/エンゼルフィッシュ/ベタ/ピラニア/タコの7種類のはず"
+        );
         assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Neon));
         assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Goldfish));
         assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Guppy));
-        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Shark));
+        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Angelfish));
+        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Betta));
+        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Piranha));
+        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Octopus));
+    }
+
+    // 回帰テスト: 狭い端末向けのテキストのみフォールバック行が、図鑑本体
+    // (dex_entries)に載っている全種類の名前を機械的に含んでいることを確認する。
+    // (実機フィードバック: 図鑑本体は7種類対応済みなのに、このフォールバック文言だけ
+    // 旧4種のまま取り残されていた見落とし事故の再発防止)
+    #[test]
+    fn dex_fallback_text_mentions_every_species_in_dex_entries() {
+        let fallback_text = dex_fallback_lines().join("\n");
+        for (name, _desc, _sp) in dex_entries() {
+            assert!(
+                fallback_text.contains(name),
+                "図鑑フォールバック文言に「{name}」が含まれていないはず: dex_entries()に追加されたのにフォールバック文言の更新が漏れている"
+            );
+        }
     }
 
     // 図鑑の最小幅・必要行数は正の値で、極端に大きくならないこと(狭い端末での
@@ -1195,13 +1426,14 @@ mod tests {
     fn dex_min_width_and_total_rows_are_reasonable() {
         let w = dex_min_width();
         let rows = dex_total_rows();
-        assert!(w > 0 && w < 80, "図鑑の最小幅が異常な値になっていないか: {w}");
+        // 実機フィードバックでスプライトを大幅に拡大し、種類数も増えたため上限を緩めている。
+        assert!(w > 0 && w < 100, "図鑑の最小幅が異常な値になっていないか: {w}");
         assert!(
-            rows > 0 && rows < 40,
+            rows > 0 && rows < 150,
             "図鑑の必要行数が異常な値になっていないか: {rows}"
         );
-        // サメは既存3種より大きいドット絵なので、図鑑の最小幅はサメ単体の幅以上のはず
-        let shark_w = dex_entry_width("サメ", "捕食者。Sキーでのみ入手可", Species::Shark);
-        assert!(w >= shark_w);
+        // ピラニアは既存3種より大きいドット絵なので、図鑑の最小幅はピラニア単体の幅以上のはず
+        let piranha_w = dex_entry_width("ピラニア", "捕食者。Sキーでのみ入手可", Species::Piranha);
+        assert!(w >= piranha_w);
     }
 }

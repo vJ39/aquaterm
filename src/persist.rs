@@ -2,7 +2,7 @@
 // 魚(種類・成長段階・空腹度・座標・速度)、餌、経過時間を保存する。
 
 use crate::fish::Fish;
-use crate::sim::{Crab, Egg, Food, Medicine, Simulation};
+use crate::sim::{Crab, Den, Egg, Food, Medicine, Plant, Rock, Simulation, Star};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -14,12 +14,27 @@ pub struct SavedState {
     pub medicine: Vec<Medicine>,
     #[serde(default)]
     pub eggs: Vec<Egg>,
+    // スター(無敵アイテム)。旧セーブには存在しないため #[serde(default)] で空扱いにする。
+    #[serde(default)]
+    pub stars: Vec<Star>,
     // 観賞用エンティティ(カニ)。旧セーブには存在しないため #[serde(default)] で空扱いにし、
     // main.rs 側で ensure_decorative_entities() により補充する。
     // (旧仕様の大型魚=BigFishは方針転換で廃止。旧セーブに残る "big_fish" キーは
     // serde が未知フィールドとして無視するだけで安全)
     #[serde(default)]
     pub crabs: Vec<Crab>,
+    // 藻・水草・タコつぼ。旧セーブには存在しないため #[serde(default)] で空扱いにし、
+    // main.rs 側で ensure_decorative_entities() により補充する。タコの巣(den_x/den_y)は
+    // Fish側で保存されるため、タコつぼの位置もここで保存してズレないようにする
+    // (保存しないと再起動時に新しい位置へ再抽選され、隠れているタコの位置と食い違う)。
+    #[serde(default)]
+    pub plants: Vec<Plant>,
+    // 岩(隠れ場所)。旧セーブには存在しないため #[serde(default)] で空扱いにし、
+    // main.rs 側で ensure_decorative_entities() により補充する。
+    #[serde(default)]
+    pub rocks: Vec<Rock>,
+    #[serde(default)]
+    pub dens: Vec<Den>,
     pub elapsed: f64,
 }
 
@@ -53,7 +68,11 @@ pub fn save(sim: &Simulation) -> std::io::Result<()> {
         food: sim.food.clone(),
         medicine: sim.medicine.clone(),
         eggs: sim.eggs.clone(),
+        stars: sim.stars.clone(),
         crabs: sim.crabs.clone(),
+        plants: sim.plants.clone(),
+        rocks: sim.rocks.clone(),
+        dens: sim.dens.clone(),
         elapsed: sim.elapsed,
     };
     let json = serde_json::to_string_pretty(&state)
@@ -67,6 +86,116 @@ pub fn restore_into(sim: &mut Simulation, state: SavedState) {
     sim.food = state.food;
     sim.medicine = state.medicine;
     sim.eggs = state.eggs;
+    sim.stars = state.stars;
     sim.crabs = state.crabs;
+    sim.plants = state.plants;
+    sim.rocks = state.rocks;
+    sim.dens = state.dens;
     sim.elapsed = state.elapsed;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::{Den, Plant};
+
+    // 実ファイルへの読み書きはユーザーの実セーブを壊すリスクがあるため、ここでは
+    // シリアライズ/デシリアライズの往復のみを検証する(state_path()経由のI/Oはしない)。
+    #[test]
+    fn plants_and_dens_survive_a_serialize_round_trip() {
+        // 藻・水草・タコつぼも保存対象であることの回帰テスト。保存しないと再起動時に
+        // 位置が再抽選され、隠れているタコのden_x/den_y(Fish側)と食い違ってしまう。
+        let state = SavedState {
+            fish: Vec::new(),
+            food: Vec::new(),
+            medicine: Vec::new(),
+            eggs: Vec::new(),
+            stars: Vec::new(),
+            crabs: Vec::new(),
+            plants: vec![Plant {
+                x: 12.5,
+                y: 30.0,
+                height: 5.0,
+                phase: 1.2,
+            }],
+            rocks: Vec::new(),
+            dens: vec![Den { x: 40.0, y: 31.0 }],
+            elapsed: 123.0,
+        };
+        let json = serde_json::to_string(&state).expect("シリアライズできるはず");
+        let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
+
+        assert_eq!(restored.plants.len(), 1);
+        assert_eq!(restored.plants[0].x, 12.5);
+        assert_eq!(restored.plants[0].y, 30.0);
+        assert_eq!(restored.dens.len(), 1);
+        assert_eq!(restored.dens[0].x, 40.0);
+        assert_eq!(restored.dens[0].y, 31.0);
+    }
+
+    #[test]
+    fn old_save_without_plants_or_dens_still_deserializes() {
+        // 旧セーブ(plants/densキーが無い)でも #[serde(default)] で空扱いになり、
+        // 読み込み自体が失敗しないことを確認する(main.rs側でensure_decorative_entities()
+        // により補充される前提)。
+        let old_json = r#"{"fish":[],"food":[],"elapsed":0.0}"#;
+        let restored: SavedState = serde_json::from_str(old_json).expect("旧セーブも読めるはず");
+        assert!(restored.plants.is_empty());
+        assert!(restored.rocks.is_empty(), "旧セーブにrocksが無くても空扱いで読めるはず");
+        assert!(restored.dens.is_empty());
+        assert!(restored.stars.is_empty(), "旧セーブにstarsが無くても空扱いで読めるはず");
+    }
+
+    #[test]
+    fn rocks_survive_a_serialize_round_trip() {
+        // 岩(隠れ場所)も保存対象であることの回帰テスト。保存しないと再起動のたびに
+        // 位置が再抽選されてしまう。
+        use crate::sim::Rock;
+        let state = SavedState {
+            fish: Vec::new(),
+            food: Vec::new(),
+            medicine: Vec::new(),
+            eggs: Vec::new(),
+            stars: Vec::new(),
+            crabs: Vec::new(),
+            plants: Vec::new(),
+            rocks: vec![Rock { x: 22.0, y: 33.0 }],
+            dens: Vec::new(),
+            elapsed: 9.0,
+        };
+        let json = serde_json::to_string(&state).expect("シリアライズできるはず");
+        let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
+        assert_eq!(restored.rocks.len(), 1);
+        assert_eq!(restored.rocks[0].x, 22.0);
+        assert_eq!(restored.rocks[0].y, 33.0);
+    }
+
+    #[test]
+    fn stars_survive_a_serialize_round_trip() {
+        // スター(無敵アイテム)も保存対象であることの回帰テスト。保存しないと
+        // 再起動のたびに出現中のスターが消えてしまう。
+        use crate::sim::Star;
+        let state = SavedState {
+            fish: Vec::new(),
+            food: Vec::new(),
+            medicine: Vec::new(),
+            eggs: Vec::new(),
+            stars: vec![Star {
+                x: 15.0,
+                y: 8.0,
+                life: 20.0,
+                phase: 0.7,
+            }],
+            crabs: Vec::new(),
+            plants: Vec::new(),
+            rocks: Vec::new(),
+            dens: Vec::new(),
+            elapsed: 5.0,
+        };
+        let json = serde_json::to_string(&state).expect("シリアライズできるはず");
+        let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
+        assert_eq!(restored.stars.len(), 1);
+        assert_eq!(restored.stars[0].x, 15.0);
+        assert_eq!(restored.stars[0].y, 8.0);
+    }
 }

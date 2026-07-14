@@ -67,3 +67,6 @@ pub const CURSOR: Color = Color::new(255, 60, 220);
 pub const GAUGE_EMPTY: Color = Color::new(40, 42, 50); // 生命残りゲージの未点灯セグメント
 pub const HUNGRY_FLAG: Color = Color::new(255, 150, 40); // 腹ペコフラグ(琥珀色)
 pub const SICK_FLAG: Color = Color::new(180, 70, 200); // 病気フラグ(紫)
+
+// スター(無敵アイテム)取得中の発光エフェクト用の色(明るい金色)
+pub const INVINCIBLE_GLOW_COLOR: Color = Color::new(255, 235, 120);
