@@ -45,6 +45,17 @@ pub fn water_gradient(y_frac: f64) -> Color {
     }
 }
 
+// 水質が悪化した時の濁った緑〜茶系の色。水質パラメータの可視化に使う。
+pub const MURKY_TINT: Color = Color::new(90, 84, 40);
+// 水槽の色にpollution_frac(0.0=綺麗..1.0=最悪)に応じて濁った色を混ぜる。
+// 全部混ぜてしまうと水槽が見づらくなりすぎるため、最大でも半分程度までしか
+// 濁らせない(MURKY_MAX_MIX)。
+pub const MURKY_MAX_MIX: f64 = 0.55;
+pub fn apply_murkiness(c: Color, pollution_frac: f64) -> Color {
+    let t = pollution_frac.clamp(0.0, 1.0) * MURKY_MAX_MIX;
+    lerp(c, MURKY_TINT, t)
+}
+
 // 元気メーター用のグラデーション色(赤=低 → 黄=中 → 緑=高)
 pub const VITALITY_LOW: Color = Color::new(214, 48, 44); // 赤(瀕死)
 pub const VITALITY_MID: Color = Color::new(232, 198, 46); // 黄(普通)
@@ -72,8 +83,8 @@ pub const SICK_FLAG: Color = Color::new(180, 70, 200); // 病気フラグ(紫)
 pub const INVINCIBLE_GLOW_COLOR: Color = Color::new(255, 235, 120);
 
 // --- 昼夜の照明変化 ---
-// 実機フィードバック(「実際の時刻に応じて水槽の照明を自動で変えてほしい。昼は現行
-// のまま・夜は暗め落ち着いたトーン・境界はなめらかに」)対応。
+// 実際の時刻に応じて水槽の照明を自動で変えてほしい(昼は現行のまま・夜は暗め落ち着いた
+// トーン・境界はなめらかに)という要望への対応。
 // 夜間トーンで寄せる先の暗く落ち着いた紺色
 pub const NIGHT_TINT: Color = Color::new(6, 10, 28);
 // 昼(6:00)/夜(18:00)の境界の前後、これだけの時間(単位:時)をかけてなめらかに変化する
@@ -174,6 +185,30 @@ mod tests {
         assert!(
             brightness(night) < brightness(c),
             "夜は全体的に暗くなるはず: night={night:?} day={c:?}"
+        );
+    }
+
+    #[test]
+    fn apply_murkiness_leaves_color_unchanged_when_clean() {
+        let c = WATER_MID;
+        assert_eq!(apply_murkiness(c, 0.0), c, "水質が綺麗(0.0)なら色は変化しないはず");
+    }
+
+    #[test]
+    fn apply_murkiness_tints_toward_murky_color_as_pollution_increases() {
+        let c = WATER_MID;
+        let dirty = apply_murkiness(c, 1.0);
+        assert_ne!(dirty, c, "水質最悪(1.0)なら色が変化するはず");
+        let half = apply_murkiness(c, 0.5);
+        // 濁り具合が強いほどMURKY_TINTに近づくはず(単調に変化する)
+        let dist = |a: Color, b: Color| {
+            ((a.r as i32 - b.r as i32).pow(2)
+                + (a.g as i32 - b.g as i32).pow(2)
+                + (a.b as i32 - b.b as i32).pow(2)) as f64
+        };
+        assert!(
+            dist(dirty, MURKY_TINT) < dist(half, MURKY_TINT),
+            "pollution_fracが大きいほど濁った色に近づくはず"
         );
     }
 }

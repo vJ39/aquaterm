@@ -46,6 +46,44 @@ pub struct SavedState {
     #[serde(default)]
     pub dens: Vec<Den>,
     pub elapsed: f64,
+    // 設定値を次回起動時に覚えておいてほしいという要望への対応で追加。
+    // 旧セーブにはキーが無いため、Ctl::new()と同じ既定値にfallbackする
+    // (真偽値の既定trueはserdeの標準defaultでは作れないため専用関数を使う)。
+    #[serde(default = "default_true")]
+    pub sfx_on: bool,
+    #[serde(default = "default_true")]
+    pub overlay_on: bool,
+    #[serde(default)]
+    pub auto_on: bool,
+    #[serde(default = "default_true")]
+    pub day_night_on: bool,
+    #[serde(default)]
+    pub auto_replenish_on: bool,
+    #[serde(default = "default_true")]
+    pub bubble_sfx_on: bool,
+    // 生み出す魚の種類のトグル(Species::COMMONと同じ並び順)。
+    #[serde(default = "default_species_toggle")]
+    pub species_toggle: [bool; 5],
+    // 餌やりの投下量レベル(餌の量を設定できるようにしてほしいという要望への対応)。
+    // 旧セーブにはキーが無いため、従来どおりの量(レベル1)にfallbackする。
+    #[serde(default = "default_feed_amount")]
+    pub feed_amount: usize,
+    // 水質(0=綺麗〜POLLUTION_MAX=最悪)。旧セーブにはキーが無いため、綺麗な状態(0.0)
+    // にfallbackする(#[serde(default)]でf64の標準デフォルト0.0がそのまま使える)。
+    #[serde(default)]
+    pub pollution: f64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_species_toggle() -> [bool; 5] {
+    [true; 5]
+}
+
+fn default_feed_amount() -> usize {
+    crate::sim::FEED_AMOUNT_DEFAULT
 }
 
 // 保存先パス ~/.config/aquaterm/state.json
@@ -65,7 +103,7 @@ pub fn load() -> Option<SavedState> {
 }
 
 // 現在の状態を保存する。
-pub fn save(sim: &Simulation) -> std::io::Result<()> {
+pub fn save(sim: &Simulation, ctl: &crate::Ctl) -> std::io::Result<()> {
     let path = match state_path() {
         Some(p) => p,
         None => return Ok(()),
@@ -87,14 +125,23 @@ pub fn save(sim: &Simulation) -> std::io::Result<()> {
         rocks: sim.rocks.clone(),
         dens: sim.dens.clone(),
         elapsed: sim.elapsed,
+        sfx_on: ctl.sfx_on,
+        overlay_on: ctl.overlay_on,
+        auto_on: ctl.auto_on,
+        day_night_on: ctl.day_night_on,
+        auto_replenish_on: ctl.auto_replenish_on,
+        bubble_sfx_on: ctl.bubble_sfx_on,
+        species_toggle: sim.species_toggle,
+        feed_amount: sim.feed_amount,
+        pollution: sim.pollution,
     };
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(&path, json)
 }
 
-// セーブ内容を Simulation に流し込む。
-pub fn restore_into(sim: &mut Simulation, state: SavedState) {
+// セーブ内容を Simulation / Ctl に流し込む。
+pub fn restore_into(sim: &mut Simulation, ctl: &mut crate::Ctl, state: SavedState) {
     sim.fish = state.fish;
     sim.food = state.food;
     sim.medicine = state.medicine;
@@ -108,6 +155,15 @@ pub fn restore_into(sim: &mut Simulation, state: SavedState) {
     sim.rocks = state.rocks;
     sim.dens = state.dens;
     sim.elapsed = state.elapsed;
+    sim.species_toggle = state.species_toggle;
+    sim.feed_amount = state.feed_amount;
+    sim.pollution = state.pollution;
+    ctl.sfx_on = state.sfx_on;
+    ctl.overlay_on = state.overlay_on;
+    ctl.auto_on = state.auto_on;
+    ctl.day_night_on = state.day_night_on;
+    ctl.auto_replenish_on = state.auto_replenish_on;
+    ctl.bubble_sfx_on = state.bubble_sfx_on;
 }
 
 #[cfg(test)]
@@ -140,6 +196,15 @@ mod tests {
             rocks: Vec::new(),
             dens: vec![Den { x: 40.0, y: 31.0 }],
             elapsed: 123.0,
+            sfx_on: true,
+            overlay_on: true,
+            auto_on: false,
+            day_night_on: true,
+            auto_replenish_on: false,
+            bubble_sfx_on: true,
+            species_toggle: [true; 5],
+            feed_amount: 1,
+            pollution: 0.0,
         };
         let json = serde_json::to_string(&state).expect("シリアライズできるはず");
         let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
@@ -165,6 +230,72 @@ mod tests {
         assert!(restored.stars.is_empty(), "旧セーブにstarsが無くても空扱いで読めるはず");
         assert!(restored.shrimp.is_empty(), "旧セーブにshrimpが無くても空扱いで読めるはず");
         assert!(restored.seahorses.is_empty(), "旧セーブにseahorsesが無くても空扱いで読めるはず");
+        // 旧セーブに設定トグルのキーが無い場合、Ctl::new()と同じ既定値にfallbackするはず
+        // (設定値を次回起動時に覚えておいてほしいという要望への対応で追加した
+        // フィールド。旧セーブとの互換性を保つための回帰テスト)。
+        assert!(restored.sfx_on, "旧セーブではsfx_onは既定のtrueにfallbackするはず");
+        assert!(restored.overlay_on, "旧セーブではoverlay_onは既定のtrueにfallbackするはず");
+        assert!(!restored.auto_on, "旧セーブではauto_onは既定のfalseにfallbackするはず");
+        assert!(restored.day_night_on, "旧セーブではday_night_onは既定のtrueにfallbackするはず");
+        assert!(!restored.auto_replenish_on, "旧セーブではauto_replenish_onは既定のfalseにfallbackするはず");
+        assert!(restored.bubble_sfx_on, "旧セーブではbubble_sfx_onは既定のtrueにfallbackするはず");
+        assert_eq!(
+            restored.species_toggle,
+            [true; 5],
+            "旧セーブではspecies_toggleは全種ONにfallbackするはず"
+        );
+        assert_eq!(
+            restored.feed_amount,
+            crate::sim::FEED_AMOUNT_DEFAULT,
+            "旧セーブではfeed_amountは従来どおりの量(デフォルト)にfallbackするはず"
+        );
+        assert_eq!(
+            restored.pollution, 0.0,
+            "旧セーブではpollutionは綺麗な状態(0.0)にfallbackするはず"
+        );
+    }
+
+    #[test]
+    fn settings_toggles_survive_a_serialize_round_trip() {
+        // 設定トグル(設定値を次回起動時に覚えておいてほしいという要望)が
+        // 保存/復元できることの回帰テスト。既定値とは異なる値を使い、単純な
+        // 既定値表示ではなく実際に値が往復していることを確認する。
+        let state = SavedState {
+            fish: Vec::new(),
+            food: Vec::new(),
+            medicine: Vec::new(),
+            meat: Vec::new(),
+            eggs: Vec::new(),
+            stars: Vec::new(),
+            crabs: Vec::new(),
+            shrimp: Vec::new(),
+            seahorses: Vec::new(),
+            plants: Vec::new(),
+            rocks: Vec::new(),
+            dens: Vec::new(),
+            elapsed: 0.0,
+            sfx_on: false,
+            overlay_on: false,
+            auto_on: true,
+            day_night_on: false,
+            auto_replenish_on: true,
+            bubble_sfx_on: false,
+            species_toggle: [true, false, true, false, true],
+            feed_amount: 3,
+            pollution: 42.5,
+        };
+        let json = serde_json::to_string(&state).expect("シリアライズできるはず");
+        let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
+
+        assert!(!restored.sfx_on);
+        assert!(!restored.overlay_on);
+        assert!(restored.auto_on);
+        assert!(!restored.day_night_on);
+        assert!(restored.auto_replenish_on);
+        assert!(!restored.bubble_sfx_on);
+        assert_eq!(restored.species_toggle, [true, false, true, false, true]);
+        assert_eq!(restored.feed_amount, 3);
+        assert_eq!(restored.pollution, 42.5);
     }
 
     #[test]
@@ -196,6 +327,15 @@ mod tests {
             rocks: Vec::new(),
             dens: Vec::new(),
             elapsed: 3.0,
+            sfx_on: true,
+            overlay_on: true,
+            auto_on: false,
+            day_night_on: true,
+            auto_replenish_on: false,
+            bubble_sfx_on: true,
+            species_toggle: [true; 5],
+            feed_amount: 1,
+            pollution: 0.0,
         };
         let json = serde_json::to_string(&state).expect("シリアライズできるはず");
         let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
@@ -224,6 +364,15 @@ mod tests {
             rocks: vec![Rock { x: 22.0, y: 33.0 }],
             dens: Vec::new(),
             elapsed: 9.0,
+            sfx_on: true,
+            overlay_on: true,
+            auto_on: false,
+            day_night_on: true,
+            auto_replenish_on: false,
+            bubble_sfx_on: true,
+            species_toggle: [true; 5],
+            feed_amount: 1,
+            pollution: 0.0,
         };
         let json = serde_json::to_string(&state).expect("シリアライズできるはず");
         let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
@@ -256,6 +405,15 @@ mod tests {
             rocks: Vec::new(),
             dens: Vec::new(),
             elapsed: 5.0,
+            sfx_on: true,
+            overlay_on: true,
+            auto_on: false,
+            day_night_on: true,
+            auto_replenish_on: false,
+            bubble_sfx_on: true,
+            species_toggle: [true; 5],
+            feed_amount: 1,
+            pollution: 0.0,
         };
         let json = serde_json::to_string(&state).expect("シリアライズできるはず");
         let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
