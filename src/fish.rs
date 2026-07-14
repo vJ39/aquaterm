@@ -4,7 +4,7 @@
 use crate::color::Color;
 use crate::sim::{
     AGILITY_FRY_SIZE_STEPS, AGILITY_MULT_MAX, AGILITY_MULT_MIN, AGILITY_STEP, FULL_THRESHOLD,
-    GENERAL_GROWTH_SCALE_STEP, GENERAL_MAX_GROWTH_STAGE, HUNGRY_THRESHOLD, MAX_HUNGER,
+    GENERAL_GROWTH_SCALE_STEP, GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE, HUNGRY_THRESHOLD, MAX_HUNGER,
     PIRANHA_KILL_GROWTH_SCALE_STEP, PIRANHA_MAX_KILL_STAGE, SIZE_SPEED_PENALTY_STEP,
 };
 use serde::{Deserialize, Serialize};
@@ -203,6 +203,27 @@ pub struct Fish {
     // (食欲を旺盛にする)。満腹判定が確定した瞬間に0へ戻す。
     #[serde(default)]
     pub piranha_meals_since_full: u32,
+    // --- 個体差(全種共通。同じ種でも個体ごとにばらつく) ---
+    // 空腹になる速さの倍率(HUNGER_DECAYに乗算)。1.0が標準、大きいほど早く空腹になる。
+    // 旧セーブにフィールドが無い場合も1.0(ニュートラル・挙動不変)にする。
+    #[serde(default = "unit_multiplier")]
+    pub hunger_decay_mult: f64,
+    // 食べた時に満たされる量の倍率(FEED_AMOUNT・捕食hunger_gain・肉餌に乗算)。
+    // 1.0が標準、大きいほど1回でしっかり満たされる(いわゆる大食い)。
+    #[serde(default = "unit_multiplier")]
+    pub feed_efficiency_mult: f64,
+    // 寿命(ELDERLY_AGE・LIFESPAN_DEATH_AGE)の倍率。1.0が標準、大きいほど長生きする。
+    #[serde(default = "unit_multiplier")]
+    pub lifespan_mult: f64,
+    // 成長できる上限段階(GENERAL_MAX_GROWTH_STAGE)からのずれ(-1/0/+1)。
+    // 旧セーブでは0(ずれ無し・挙動不変)になる。
+    #[serde(default)]
+    pub growth_cap_variance: i8,
+}
+
+// serde(default = ...) 用。0.0ではなく1.0(ニュートラル)を旧セーブの既定値にするための関数。
+fn unit_multiplier() -> f64 {
+    1.0
 }
 
 impl Fish {
@@ -247,6 +268,10 @@ impl Fish {
             attract_dx: 0.0,
             attract_dy: 0.0,
             piranha_meals_since_full: 0,
+            hunger_decay_mult: 1.0,
+            feed_efficiency_mult: 1.0,
+            lifespan_mult: 1.0,
+            growth_cap_variance: 0,
         }
     }
 
@@ -285,7 +310,7 @@ impl Fish {
     // 無限に大きくならない。
     pub fn render_scale(&self) -> f64 {
         let general =
-            self.growth_stage.min(GENERAL_MAX_GROWTH_STAGE) as f64 * GENERAL_GROWTH_SCALE_STEP;
+            self.growth_stage.min(GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE) as f64 * GENERAL_GROWTH_SCALE_STEP;
         let kill = if matches!(self.species, Species::Piranha) {
             self.kill_stage.min(PIRANHA_MAX_KILL_STAGE) as f64 * PIRANHA_KILL_GROWTH_SCALE_STEP
         } else {
@@ -315,7 +340,7 @@ impl Fish {
     // サイズ成長に応じた泳ぐ速度の減衰率(1.0=減衰なし)。必須ではない体感の変化として、
     // 大きくなるほどわずかに遅くなる。
     pub fn size_speed_mult(&self) -> f64 {
-        let stages = self.growth_stage.min(GENERAL_MAX_GROWTH_STAGE) as f64
+        let stages = self.growth_stage.min(GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE) as f64
             + if matches!(self.species, Species::Piranha) {
                 self.kill_stage.min(PIRANHA_MAX_KILL_STAGE) as f64
             } else {
@@ -333,7 +358,7 @@ impl Fish {
         } else {
             0.0
         };
-        let growth_component = self.growth_stage.min(GENERAL_MAX_GROWTH_STAGE) as f64;
+        let growth_component = self.growth_stage.min(GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE) as f64;
         let kill_component = if matches!(self.species, Species::Piranha) {
             self.kill_stage.min(PIRANHA_MAX_KILL_STAGE) as f64
         } else {
@@ -418,9 +443,8 @@ impl Sprite {
             // 実機フィードバック(「ピラニアっぽくない。卵型のUFOに見える」)を受けて、
             // 背びれが体から連続的に伸びる紡錘形のシルエットに描き直した(背びれが
             // 体から浮いて見えたり、尾びれが下に伸びる脚のように見えていた問題を修正)。
-            // 方針転換(「サメではなくピラニアにしよう」)を受けて描き直した。既存の
-            // 大型・紡錘形のサメのシルエットではなく、小型でずんぐりした体高のある
-            // 楕円形+下顎の鋭い歯(A)+銀色の体という伝統的なピラニアの見た目にする。
+            // 小型でずんぐりした体高のある楕円形+下顎の鋭い歯(A)+銀色の体という
+            // 伝統的なピラニアの見た目にする。
             // (受け取ったパターン例は頭部が左向きだったため、既存の「頭部は右向き
             // (facing_right時)」規約に合わせて左右反転して使っている)
             // 実機フィードバック(「もっとピラニアらしくして」)を受けて再調整。

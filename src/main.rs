@@ -434,6 +434,9 @@ fn handle_key(
         }
         KeyCode::Char('s') => {
             ctl.sfx_on = !ctl.sfx_on;
+            // `s`は全体ミュートのクイックキーとして、バブル音トグルも連動させる
+            // (個別に分けたい場合は設定画面(`,`)で気泡音だけを後から切り替えられる)。
+            ctl.bubble_sfx_on = ctl.sfx_on;
             sim.set_message(if ctl.sfx_on { "効果音ON" } else { "効果音OFF" });
         }
         KeyCode::Char('a') => {
