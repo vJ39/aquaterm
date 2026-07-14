@@ -188,6 +188,15 @@ pub struct Fish {
     // (一時的な捕食者反転ギミック)。
     #[serde(default)]
     pub invincible_timer: f64,
+    // `T`キー(トントン)で軽くノックされた直後、興味を持ってその位置へ近づいて
+    // いる残り時間。`t`(コンコン)の驚き逃走(flee_timer/flee_dx/flee_dy)と対に
+    // なる、引き寄せ側の状態。0より大きい間、attract_dx/dyの方向へ穏やかに加速する。
+    #[serde(default)]
+    pub attract_timer: f64,
+    #[serde(default)]
+    pub attract_dx: f64,
+    #[serde(default)]
+    pub attract_dy: f64,
 }
 
 impl Fish {
@@ -228,6 +237,9 @@ impl Fish {
             dead: false,
             dead_timer: 0.0,
             invincible_timer: 0.0,
+            attract_timer: 0.0,
+            attract_dx: 0.0,
+            attract_dy: 0.0,
         }
     }
 
@@ -597,6 +609,36 @@ pub fn crab_sprite() -> Sprite {
     )
 }
 
+// エビのスプライト。カニと同じ位置づけの観賞用背景生物(育成ロジック対象外・
+// 捕食対象外・自身も捕食しない)。水底や藻の近くをゆっくり歩く/漂う。
+pub fn shrimp_sprite() -> Sprite {
+    let lines: &[&str] = &[".AA..", "EBBB<"];
+    Sprite::parse(
+        lines,
+        Palette {
+            body: Color::new(235, 170, 165),  // 淡い桜色の体
+            accent: Color::new(255, 140, 120), // 背の縞・触角の差し色
+            eye: Color::new(20, 10, 5),
+            fin: Color::new(235, 170, 165), // 尾(<)は体と同色
+        },
+    )
+}
+
+// タツノオトシゴのスプライト。カニ・エビと同じ位置づけの観賞用背景生物。
+// 藻に絡みつくようにゆっくり動き、あまり大きく移動しない。
+pub fn seahorse_sprite() -> Sprite {
+    let lines: &[&str] = &[".AA.", "EBBA", ".BB.", ".BA.", "..A."];
+    Sprite::parse(
+        lines,
+        Palette {
+            body: Color::new(230, 195, 90),   // 黄金色の体
+            accent: Color::new(190, 150, 60), // 背の模様・尾の巻き
+            eye: Color::new(20, 10, 5),
+            fin: Color::new(230, 195, 90), // 使わない(bodyと同色にしておく)
+        },
+    )
+}
+
 // タコつぼ(装飾+タコの巣)のスプライト。水底に置く壺型の静的オブジェクト。
 // 実機フィードバック(「小さく目立たなかった。壺らしい形がはっきり分かるサイズに」)を
 // 受けて、開口部(狭い口)・首・肩の張り・丸みのある胴体・すぼまった底までしっかり
@@ -645,6 +687,51 @@ pub fn rock_sprite() -> Sprite {
             accent: Color::new(80, 78, 74),   // 陰影の濃い灰色
             eye: Color::new(0, 0, 0),         // 使わない
             fin: Color::new(0, 0, 0),         // 使わない
+        },
+    )
+}
+
+// カメオ生物(完全観賞用・低頻度出現・育成ロジック・捕食判定のいずれにも参加しない)。
+// ウミガメ: 甲羅+頭部のシルエット。
+pub fn turtle_sprite() -> Sprite {
+    let lines: &[&str] = &[
+        "....AAAA....",
+        "..ABBBBBBA..",
+        ".BBBBBBBBBB.",
+        "EBBBBBBBBBBB",
+        ".BBBBBBBBBB.",
+        "..A.BBBB.A..",
+    ];
+    Sprite::parse(
+        lines,
+        Palette {
+            body: Color::new(70, 130, 80),   // 深緑の甲羅
+            accent: Color::new(45, 95, 55),  // 甲羅の模様・ヒレの濃い緑
+            eye: Color::new(15, 15, 15),
+            fin: Color::new(0, 0, 0), // 使わない
+        },
+    )
+}
+
+// クラゲ: 丸いカサ+ゆらめく足(触手)。
+pub fn jellyfish_sprite() -> Sprite {
+    let lines: &[&str] = &[
+        "..AAAAA..",
+        ".ABBBBBA.",
+        "ABBBBBBBA",
+        ".BBBBBBB.",
+        "..A.A.A..",
+        ".A.A.A.A.",
+        "A.A.A.A.A",
+        ".A.A.A.A.",
+    ];
+    Sprite::parse(
+        lines,
+        Palette {
+            body: Color::new(220, 180, 235),  // 淡い紫のカサ
+            accent: Color::new(180, 130, 210), // 触手・カサの縁の濃い紫
+            eye: Color::new(0, 0, 0),          // 使わない
+            fin: Color::new(0, 0, 0),          // 使わない
         },
     )
 }

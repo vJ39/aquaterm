@@ -70,3 +70,110 @@ pub const SICK_FLAG: Color = Color::new(180, 70, 200); // 病気フラグ(紫)
 
 // スター(無敵アイテム)取得中の発光エフェクト用の色(明るい金色)
 pub const INVINCIBLE_GLOW_COLOR: Color = Color::new(255, 235, 120);
+
+// --- 昼夜の照明変化 ---
+// 実機フィードバック(「実際の時刻に応じて水槽の照明を自動で変えてほしい。昼は現行
+// のまま・夜は暗め落ち着いたトーン・境界はなめらかに」)対応。
+// 夜間トーンで寄せる先の暗く落ち着いた紺色
+pub const NIGHT_TINT: Color = Color::new(6, 10, 28);
+// 昼(6:00)/夜(18:00)の境界の前後、これだけの時間(単位:時)をかけてなめらかに変化する
+pub const DAY_NIGHT_TRANSITION_HOURS: f64 = 1.0;
+
+// ローカル時刻(0.0..24.0、分を小数で含む)から、昼=1.0・夜=0.0のなめらかな
+// 明るさ係数を返す。昼(6:00-18:00)はそのまま(1.0)、夜(18:00-6:00)は0.0。
+// 境界の前後 DAY_NIGHT_TRANSITION_HOURS はスムーズステップで補間し、パキッと
+// 切り替わらないようにする。
+pub fn day_brightness(hour: f64) -> f64 {
+    let smoothstep = |t: f64| {
+        let t = t.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let tr = DAY_NIGHT_TRANSITION_HOURS;
+    if hour >= 6.0 - tr && hour < 6.0 + tr {
+        smoothstep((hour - (6.0 - tr)) / (2.0 * tr))
+    } else if hour >= 18.0 - tr && hour < 18.0 + tr {
+        1.0 - smoothstep((hour - (18.0 - tr)) / (2.0 * tr))
+    } else if hour >= 6.0 + tr && hour < 18.0 - tr {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+// 昼夜の明るさ係数(day: 1.0=昼..0.0=夜)を色に適用する。夜に近いほど暗く
+// 落ち着いた紺色(NIGHT_TINT)に寄せつつ、明度自体も落とす。day=1.0のときは
+// 元の色から変化しない(「昼間は現行のまま」を保証する)。
+pub fn apply_day_night(c: Color, day: f64) -> Color {
+    let night_mix = (1.0 - day).clamp(0.0, 1.0);
+    let tinted = lerp(c, NIGHT_TINT, night_mix * 0.55);
+    scale(tinted, 1.0 - night_mix * 0.45)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn day_brightness_is_full_during_the_day_plateau() {
+        assert_eq!(day_brightness(7.0), 1.0);
+        assert_eq!(day_brightness(12.0), 1.0);
+        assert_eq!(day_brightness(17.0), 1.0);
+    }
+
+    #[test]
+    fn day_brightness_is_zero_during_the_night_plateau() {
+        assert_eq!(day_brightness(0.0), 0.0);
+        assert_eq!(day_brightness(2.0), 0.0);
+        assert_eq!(day_brightness(19.0), 0.0);
+        assert_eq!(day_brightness(23.9), 0.0);
+    }
+
+    #[test]
+    fn day_brightness_transitions_smoothly_at_boundaries() {
+        // 6:00・18:00の境界そのものはちょうど中間(0.5)付近になるはず(スムーズステップ)。
+        let morning_mid = day_brightness(6.0);
+        assert!(
+            morning_mid > 0.0 && morning_mid < 1.0,
+            "境界ちょうどはパキッと切り替わらず中間値のはず: {morning_mid}"
+        );
+        let evening_mid = day_brightness(18.0);
+        assert!(
+            evening_mid > 0.0 && evening_mid < 1.0,
+            "境界ちょうどはパキッと切り替わらず中間値のはず: {evening_mid}"
+        );
+        // 境界に近づくほど単調に変化する(パキッと不連続に飛ばない)ことを、
+        // 細かい刻みでサンプルして確認する。
+        let mut prev = day_brightness(5.0 - 0.001);
+        let mut max_jump = 0.0f64;
+        let mut t = 5.0;
+        while t <= 7.0 {
+            let v = day_brightness(t);
+            max_jump = max_jump.max((v - prev).abs());
+            prev = v;
+            t += 0.01;
+        }
+        assert!(
+            max_jump < 0.02,
+            "0.01時間刻みでの変化が滑らかであるはず(急激な飛びが無いはず): {max_jump}"
+        );
+    }
+
+    #[test]
+    fn apply_day_night_leaves_color_unchanged_at_full_day() {
+        let c = Color::new(64, 190, 210);
+        assert_eq!(apply_day_night(c, 1.0), c, "昼間は現行のまま変化しないはず");
+    }
+
+    #[test]
+    fn apply_day_night_dims_and_tints_toward_navy_at_full_night() {
+        let c = Color::new(64, 190, 210);
+        let night = apply_day_night(c, 0.0);
+        assert_ne!(night, c, "夜は元の色から変化するはず");
+        // 全体的に暗くなる(明度が下がる)はず
+        let brightness = |col: Color| col.r as u32 + col.g as u32 + col.b as u32;
+        assert!(
+            brightness(night) < brightness(c),
+            "夜は全体的に暗くなるはず: night={night:?} day={c:?}"
+        );
+    }
+}

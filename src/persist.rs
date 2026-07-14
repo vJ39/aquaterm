@@ -2,7 +2,7 @@
 // 魚(種類・成長段階・空腹度・座標・速度)、餌、経過時間を保存する。
 
 use crate::fish::Fish;
-use crate::sim::{Crab, Den, Egg, Food, Medicine, Plant, Rock, Simulation, Star};
+use crate::sim::{Crab, Den, Egg, Food, Medicine, Plant, Rock, Seahorse, Shrimp, Simulation, Star};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -23,6 +23,13 @@ pub struct SavedState {
     // serde が未知フィールドとして無視するだけで安全)
     #[serde(default)]
     pub crabs: Vec<Crab>,
+    // エビ・タツノオトシゴ(カニと同じ位置づけの観賞用背景生物)。旧セーブには存在
+    // しないため #[serde(default)] で空扱いにし、main.rs 側で ensure_decorative_entities()
+    // により補充する。
+    #[serde(default)]
+    pub shrimp: Vec<Shrimp>,
+    #[serde(default)]
+    pub seahorses: Vec<Seahorse>,
     // 藻・水草・タコつぼ。旧セーブには存在しないため #[serde(default)] で空扱いにし、
     // main.rs 側で ensure_decorative_entities() により補充する。タコの巣(den_x/den_y)は
     // Fish側で保存されるため、タコつぼの位置もここで保存してズレないようにする
@@ -70,6 +77,8 @@ pub fn save(sim: &Simulation) -> std::io::Result<()> {
         eggs: sim.eggs.clone(),
         stars: sim.stars.clone(),
         crabs: sim.crabs.clone(),
+        shrimp: sim.shrimp.clone(),
+        seahorses: sim.seahorses.clone(),
         plants: sim.plants.clone(),
         rocks: sim.rocks.clone(),
         dens: sim.dens.clone(),
@@ -88,6 +97,8 @@ pub fn restore_into(sim: &mut Simulation, state: SavedState) {
     sim.eggs = state.eggs;
     sim.stars = state.stars;
     sim.crabs = state.crabs;
+    sim.shrimp = state.shrimp;
+    sim.seahorses = state.seahorses;
     sim.plants = state.plants;
     sim.rocks = state.rocks;
     sim.dens = state.dens;
@@ -112,6 +123,8 @@ mod tests {
             eggs: Vec::new(),
             stars: Vec::new(),
             crabs: Vec::new(),
+            shrimp: Vec::new(),
+            seahorses: Vec::new(),
             plants: vec![Plant {
                 x: 12.5,
                 y: 30.0,
@@ -144,6 +157,45 @@ mod tests {
         assert!(restored.rocks.is_empty(), "旧セーブにrocksが無くても空扱いで読めるはず");
         assert!(restored.dens.is_empty());
         assert!(restored.stars.is_empty(), "旧セーブにstarsが無くても空扱いで読めるはず");
+        assert!(restored.shrimp.is_empty(), "旧セーブにshrimpが無くても空扱いで読めるはず");
+        assert!(restored.seahorses.is_empty(), "旧セーブにseahorsesが無くても空扱いで読めるはず");
+    }
+
+    #[test]
+    fn shrimp_and_seahorses_survive_a_serialize_round_trip() {
+        // エビ・タツノオトシゴ(観賞用背景生物)も保存対象であることの回帰テスト。
+        use crate::sim::{Seahorse, Shrimp};
+        let state = SavedState {
+            fish: Vec::new(),
+            food: Vec::new(),
+            medicine: Vec::new(),
+            eggs: Vec::new(),
+            stars: Vec::new(),
+            crabs: Vec::new(),
+            shrimp: vec![Shrimp {
+                x: 11.0,
+                dir: 1.0,
+                pause_timer: 0.0,
+                facing_right: true,
+            }],
+            seahorses: vec![Seahorse {
+                anchor_x: 5.0,
+                anchor_y: 6.0,
+                x: 5.5,
+                y: 6.2,
+                phase: 0.4,
+            }],
+            plants: Vec::new(),
+            rocks: Vec::new(),
+            dens: Vec::new(),
+            elapsed: 3.0,
+        };
+        let json = serde_json::to_string(&state).expect("シリアライズできるはず");
+        let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
+        assert_eq!(restored.shrimp.len(), 1);
+        assert_eq!(restored.shrimp[0].x, 11.0);
+        assert_eq!(restored.seahorses.len(), 1);
+        assert_eq!(restored.seahorses[0].anchor_x, 5.0);
     }
 
     #[test]
@@ -158,6 +210,8 @@ mod tests {
             eggs: Vec::new(),
             stars: Vec::new(),
             crabs: Vec::new(),
+            shrimp: Vec::new(),
+            seahorses: Vec::new(),
             plants: Vec::new(),
             rocks: vec![Rock { x: 22.0, y: 33.0 }],
             dens: Vec::new(),
@@ -187,6 +241,8 @@ mod tests {
                 phase: 0.7,
             }],
             crabs: Vec::new(),
+            shrimp: Vec::new(),
+            seahorses: Vec::new(),
             plants: Vec::new(),
             rocks: Vec::new(),
             dens: Vec::new(),

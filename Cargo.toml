@@ -14,6 +14,9 @@ unicode-width = "0.1"
 # クロスコンパイル環境ではrodioの依存(alsa-sys)がpkg-config経由でALSAを探せず
 # ビルドに失敗することがあるため、optional化してsound featureで切り離せるようにする。
 rodio = { version = "0.22", default-features = false, features = ["playback"], optional = true }
+# 昼夜連動の照明変化: システムのローカル時刻(時)を取得するためだけに使う
+# (default-features = false + clock のみで、シリアライズ等の余分な機能は入れない)。
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [features]
 default = ["sound"]

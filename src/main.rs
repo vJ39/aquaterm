@@ -1,8 +1,9 @@
 // aquaterm — aquazone 風の端末熱帯魚育成ツール
 //   crossterm による自前ハーフブロック描画。ratatui は使わない。
 //   起動: 前回状態を ~/.config/aquaterm/state.json から復元(無ければ初期状態)。
-//   キー: 矢印=カーソル移動 / f=餌 / m=薬 / t=ガラスを叩く / p=一時停止 / [ ]=速度 / R=リセット /
-//        v=ステータスオーバーレイ表示切替 / s=効果音ON/OFF / a=自動モード / +,-=増減 /
+//   キー: 矢印=カーソル移動 / f=餌 / m=薬 / t=ガラスを叩く / T=トントン(引き寄せ) /
+//        p=一時停止 / [ ]=速度 / R=リセット / v=ステータスオーバーレイ表示切替 /
+//        s=効果音ON/OFF / a=自動モード / A=自動魚補充 / +,-=増減 /
 //        S=ピラニア確定追加 / O=タコ確定追加 / D=タコつぼ再配置 / P=藻・水草再配置 / ,=設定 / ?=ヘルプ / q=終了
 
 mod color;
@@ -14,9 +15,10 @@ mod sim;
 mod sound;
 
 use color::{
-    lerp, scale, vitality_color, water_gradient, Color, CURSOR, GAUGE_EMPTY, HUNGRY_FLAG,
-    INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG, SICK_TINT,
+    apply_day_night, day_brightness, lerp, scale, vitality_color, water_gradient, Color, CURSOR,
+    GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG, SICK_TINT,
 };
+use chrono::{Local, Timelike};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyModifiers},
@@ -75,10 +77,12 @@ struct Ctl {
     auto_on: bool,    // 自動モード(自動餌やり・自動投薬・自動ガラス叩き)のON/OFF。既定OFF
     settings_on: bool,     // 設定画面(,キー)を開いているか
     settings_selected: usize, // 設定画面での選択項目インデックス(0..SETTINGS_ITEM_COUNT)
+    day_night_on: bool, // 実際の時刻に応じた昼夜の照明変化のON/OFF。既定ON
+    auto_replenish_on: bool, // 自動魚補充(Aキー)のON/OFF。既定OFF。自動モード(aキー)とは別トグル
 }
 
-// 設定画面で切り替えられる項目数(効果音・オーバーレイ・自動モード)
-const SETTINGS_ITEM_COUNT: usize = 3;
+// 設定画面で切り替えられる項目数(効果音・オーバーレイ・自動モード・昼夜連動・自動魚補充)
+const SETTINGS_ITEM_COUNT: usize = 5;
 
 fn main() {
     if let Err(e) = run() {
@@ -135,6 +139,8 @@ fn run() -> std::io::Result<()> {
         auto_on: false,   // 既定はOFF(手動操作を邪魔しないため)
         settings_on: false,
         settings_selected: 0,
+        day_night_on: true, // 既定はON(実際の時刻に応じて自動で明るさが変わる)
+        auto_replenish_on: false, // 既定OFF(勝手に増えるのを望まない場合もあるため)
     };
 
     // 効果音エンジン: オーディオデバイスが無い/初期化失敗でも SoundEngine::new() 自体は
@@ -214,6 +220,11 @@ fn run() -> std::io::Result<()> {
             if ctl.auto_on {
                 sim.update_auto_care(sim_dt, fb.pix_width(), fb.pix_height());
             }
+            // 自動魚補充(Aキー)ON中は、通常魚が少なくなったら自動で+キー相当の
+            // 補充を行う(自動モードaキーとは別トグル)。
+            if ctl.auto_replenish_on {
+                sim.update_auto_replenish(sim_dt, fb.pix_width(), fb.pix_height());
+            }
 
             // このtickで発生した効果音イベントを再生する(OFF中は消費だけして鳴らさない)
             if ctl.sfx_on {
@@ -240,7 +251,15 @@ fn run() -> std::io::Result<()> {
             // v キーで非表示にしている間は点滅にかかわらず常に非表示のまま。
             let blink_phase = (blink_elapsed / OVERLAY_BLINK_INTERVAL_SECS) as u64 % 2 == 0;
             let overlay_visible = ctl.overlay_on && blink_phase;
-            render_tank(&mut fb, &sim, ctl.cursor_x, ctl.cursor_y, overlay_visible);
+            let day = if ctl.day_night_on {
+                let now = Local::now();
+                let hour =
+                    now.hour() as f64 + now.minute() as f64 / 60.0 + now.second() as f64 / 3600.0;
+                day_brightness(hour)
+            } else {
+                1.0 // OFF中は常に昼間相当の明るさに固定する
+            };
+            render_tank(&mut fb, &sim, ctl.cursor_x, ctl.cursor_y, overlay_visible, day);
             fb.flush(&mut out)?;
             draw_status_bar(&mut out, &sim, &ctl, fb.pix_width(), fb.pix_height(), cols_u, display_rows)?;
             out.flush()?;
@@ -309,6 +328,8 @@ fn handle_key(
                 0 => ctl.sfx_on = !ctl.sfx_on,
                 1 => ctl.overlay_on = !ctl.overlay_on,
                 2 => ctl.auto_on = !ctl.auto_on,
+                3 => ctl.day_night_on = !ctl.day_night_on,
+                4 => ctl.auto_replenish_on = !ctl.auto_replenish_on,
                 _ => {}
             },
             KeyCode::Esc => {
@@ -372,6 +393,7 @@ fn handle_key(
         KeyCode::Char('f') => sim.feed(ctl.cursor_x, fb.pix_width()),
         KeyCode::Char('m') => sim.medicate(ctl.cursor_x, fb.pix_width()),
         KeyCode::Char('t') => sim.knock(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
+        KeyCode::Char('T') => sim.tap_attract(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
         KeyCode::Char('p') => {
             ctl.paused = !ctl.paused;
             sim.set_message(if ctl.paused { "一時停止" } else { "再開" });
@@ -409,6 +431,14 @@ fn handle_key(
                 "自動モードON(自動餌やり/投薬/ガラス叩き)"
             } else {
                 "自動モードOFF"
+            });
+        }
+        KeyCode::Char('A') => {
+            ctl.auto_replenish_on = !ctl.auto_replenish_on;
+            sim.set_message(if ctl.auto_replenish_on {
+                "自動魚補充ON(通常魚が減ったら自動追加)"
+            } else {
+                "自動魚補充OFF"
             });
         }
         KeyCode::Char('+') | KeyCode::Char('=') => sim.add_fish(fb.pix_width(), fb.pix_height()),
@@ -452,18 +482,29 @@ fn fish_pixel_color(f: &Fish, dx: usize, dy: usize, base: Color) -> Color {
 }
 
 // 水槽の1フレームをフレームバッファへ描く
-fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: f64, overlay_on: bool) {
+fn render_tank(
+    fb: &mut FrameBuffer,
+    sim: &Simulation,
+    cursor_x: f64,
+    cursor_y: f64,
+    overlay_on: bool,
+    day: f64,
+) {
     let w = fb.pix_width();
     let h = fb.pix_height();
     let sand_h = sand_height(h);
     let sand_top = h.saturating_sub(sand_h);
 
-    // 背景: 水のグラデーション + 水底の砂
+    // 背景: 水のグラデーション + 水底の砂。実際の時刻に応じた昼夜の明るさ係数(day:
+    // 1.0=昼..0.0=夜)を適用し、夜は暗く落ち着いた紺色に寄せる(実機フィードバック
+    // 「水槽を暗くしたり明るくしたりしたい」対応。境界はcolor::day_brightness側で
+    // なめらかに補間済みなので、ここではその係数をそのまま使うだけでよい)。
     for y in 0..h {
         if y >= sand_top {
             for x in 0..w {
                 let speckle = (x * 7 + y * 13) % 11 == 0;
-                fb.set_pixel(x, y, if speckle { SAND } else { SAND_DEEP });
+                let base = if speckle { SAND } else { SAND_DEEP };
+                fb.set_pixel(x, y, apply_day_night(base, day));
             }
         } else {
             let frac = if sand_top > 0 {
@@ -471,7 +512,7 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
             } else {
                 0.0
             };
-            let c = water_gradient(frac);
+            let c = apply_day_night(water_gradient(frac), day);
             for x in 0..w {
                 fb.set_pixel(x, y, c);
             }
@@ -479,23 +520,29 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
     }
 
     // 藻・水草(装飾。育成ロジックには参加しない静的オブジェクト。ゆらゆら揺れるだけ)。
-    // 実機フィードバック(「魚が隠れられるくらい大きく」)対応: 単一の細い茎ではなく、
-    // 複数の茎を束ねた「株」として描くことで、魚がすっぽり収まる大きさの茂みに見せる。
-    // 先端ほど大きく揺れるようにして、水中で揺らめく感じを出す。
+    // 実機フィードバック(「魚が隠れられるくらい大きく」→まだ小さいとの再指摘。
+    // 「本当に魚が隠れるぐらい、魚のドット絵より明らかに大きいサイズに」)対応:
+    // 単一の細い茎ではなく、複数の太い茎(2px幅)を大きく束ねた「株」として描くことで、
+    // 魚を完全に覆い隠せる大きさの茂みにする。先端ほど大きく揺れるようにして、
+    // 水中で揺らめく感じを出す。
     let plant_color = Color::new(55, 145, 75);
     let plant_color_dark = Color::new(38, 118, 60); // 奥の茎(重なりの奥行き表現)
+    const PLANT_BLADE_OFFSETS: [f64; 9] = [-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0];
     for p in &sim.plants {
         let segs = p.height.round().max(2.0) as usize;
         // 束になった茎(株)を数本、根元のx位置をずらして描く。茎ごとに位相・高さ・
         // 揺れの速さを少しずつずらすことで、まとまって見えつつも一体感のある茂みになる。
-        for (blade_i, &blade_dx) in [-2.0, -1.0, 0.0, 1.0, 2.0].iter().enumerate() {
+        for (blade_i, &blade_dx) in PLANT_BLADE_OFFSETS.iter().enumerate() {
             let blade_phase = p.phase + blade_i as f64 * 0.9;
-            let blade_segs = ((segs as f64) * (0.75 + 0.08 * blade_i as f64)).round().max(2.0) as usize;
+            let blade_segs = ((segs as f64) * (0.75 + 0.05 * blade_i as f64)).round().max(2.0) as usize;
             let color = if blade_i % 2 == 0 { plant_color } else { plant_color_dark };
             for seg in 0..blade_segs {
                 let t = seg as f64 / blade_segs as f64; // 0(根元)〜1(先端側)
-                let sway = (sim.elapsed * sim::PLANT_SWAY_FREQ + blade_phase).sin() * t * 1.6;
-                put(fb, p.x + blade_dx + sway, p.y - seg as f64, color, w, h);
+                let sway = (sim.elapsed * sim::PLANT_SWAY_FREQ + blade_phase).sin() * t * 2.2;
+                let bx = p.x + blade_dx + sway;
+                let by = p.y - seg as f64;
+                put(fb, bx, by, color, w, h);
+                put(fb, bx + 1.0, by, color, w, h); // 1px幅の細い線に見えないよう太らせる
             }
         }
     }
@@ -509,6 +556,36 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
     // タコつぼ(装飾+タコの巣)
     for d in &sim.dens {
         draw_sprite(fb, &fish::den_sprite(), d.x, d.y, true, w, h, |_, _, base| base);
+    }
+
+    // カメオ生物(ウミガメ・クラゲ・小魚の群れ)。完全観賞用で、育成ロジック・
+    // 捕食判定のいずれにも参加しない。低頻度で画面の端から端まで通過するだけ。
+    for c in &sim.cameos {
+        let facing_right = c.vx > 0.0;
+        match c.kind {
+            sim::CameoKind::Turtle => {
+                draw_sprite(fb, &fish::turtle_sprite(), c.x, c.y, facing_right, w, h, |_, _, base| base);
+            }
+            sim::CameoKind::Jellyfish => {
+                draw_sprite(fb, &fish::jellyfish_sprite(), c.x, c.y, facing_right, w, h, |_, _, base| base);
+            }
+            sim::CameoKind::FishSchool => {
+                // 専用スプライトを持たず、小さな魚を数匹の群れとして描く
+                // (それぞれ位相をずらして、ばらけつつも一緒に泳いでいるように見せる)。
+                let school_color = Color::new(210, 225, 235);
+                const SCHOOL_SIZE: usize = 4;
+                for j in 0..SCHOOL_SIZE {
+                    let ox = (j as f64 - (SCHOOL_SIZE as f64 - 1.0) / 2.0) * 3.0;
+                    let oy = (c.phase * 1.3 + j as f64 * 1.1).sin() * 1.5;
+                    let fx = c.x + ox;
+                    let fy = c.y + oy;
+                    put(fb, fx, fy, school_color, w, h);
+                    // 尾びれ分の1ピクセルを進行方向の後ろに置いて、小魚らしい輪郭にする
+                    let tail_dx = if facing_right { -1.0 } else { 1.0 };
+                    put(fb, fx + tail_dx, fy, school_color, w, h);
+                }
+            }
+        }
     }
 
     // 血の滲み(範囲エフェクト): 捕食位置を中心に、同心円状に赤い波紋が広がっていく
@@ -535,7 +612,8 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
 
     // 墨(タコが吐く): 血の滲みと同じ「同心円状に広がってフェードアウトする」構造を
     // 再利用しつつ、血より広め・勢いよく(速く)拡散する黒っぽい色で描く。
-    let ink_tint = Color::new(18, 16, 20);
+    // 実機フィードバック(「まだ薄い。完全な黒に近づけてほしい」)を受けて、ほぼ純黒にした(旧(18,16,20))。
+    let ink_tint = Color::new(2, 2, 3);
     for c in &sim.ink_clouds {
         draw_spreading_stain(
             fb,
@@ -563,6 +641,18 @@ fn render_tank(fb: &mut FrameBuffer, sim: &Simulation, cursor_x: f64, cursor_y: 
     let crab_y = sand_top as f64 - 1.0;
     for c in &sim.crabs {
         draw_sprite(fb, &crab_sprite(), c.x, crab_y, c.facing_right, w, h, |_, _, base| base);
+    }
+
+    // エビ(観賞用・カニと同じ位置づけ。水底を歩くだけ。育成ロジック対象外)
+    let shrimp_y = sand_top as f64 - 1.0;
+    for s in &sim.shrimp {
+        draw_sprite(fb, &fish::shrimp_sprite(), s.x, shrimp_y, s.facing_right, w, h, |_, _, base| base);
+    }
+
+    // タツノオトシゴ(観賞用・カニ・エビと同じ位置づけ。藻に絡みつくようにゆっくり
+    // 動き、あまり大きく移動しない。育成ロジック対象外)
+    for s in &sim.seahorses {
+        draw_sprite(fb, &fish::seahorse_sprite(), s.x, s.y, true, w, h, |_, _, base| base);
     }
 
     // 卵(水底付近、淡いクリーム色)
@@ -809,6 +899,8 @@ fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usiz
         // 産卵時のキラキラ演出。中心色はここでは使わず(下のSpawn専用分岐で描く)、
         // 網羅性のためだけに明るい金〜白を割り当てておく。
         sim::EffectKind::Spawn => Color::new(255, 245, 190),
+        // トントン(Tキー): Knock(淡い銀白色)とは対照的な、優しい印象の暖かいピンク。
+        sim::EffectKind::Tap => Color::new(255, 195, 205),
     };
 
     if e.kind == sim::EffectKind::Spawn {
@@ -959,14 +1051,18 @@ fn draw_status_bar(
             format!("x{}", SPEED_STEPS[ctl.speed_idx])
         };
         let auto = if ctl.auto_on { "ON" } else { "OFF" };
+        // 既存の自動モード(自動餌やり/投薬/ガラス叩き)とは別枠の表示にする
+        // (実機フィードバック「捕食するやつばかりだと魚がいなくなる」対応の新規トグル)。
+        let auto_replenish = if ctl.auto_replenish_on { "ON" } else { "OFF" };
         let base = format!(
-            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [t]コンコン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [+/-]増減 [S]ピラニア [O]タコ [D]タコつぼ [P]水草 [,]設定 [?]ヘルプ [q]終了 ",
+            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  補充 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [t]コンコン [T]トントン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [A]補充 [+/-]増減 [S]ピラニア [O]タコ [D]タコつぼ [P]水草 [,]設定 [?]ヘルプ [q]終了 ",
             sim.fish_count(),
             cap,
             sim.sick_count(),
             sim.food_count(),
             speed,
             auto,
+            auto_replenish,
             mm,
             ss
         );
@@ -1119,7 +1215,7 @@ fn dex_fallback_lines() -> [&'static str; 5] {
         "  種類: ネオン(青) / 金魚(オレンジ) / グッピー(白+差し色)",
         "        エンゼルフィッシュ(縦長で優雅) / ベタ(派手なヒレ)",
         "  捕食者: ピラニア(銀色+腹に赤み) / タコ(つぼに隠れ、時々出てくる)",
-        "  観賞用: カニ(水底を歩く)も泳いでいます",
+        "  観賞用: カニ・エビ(水底を歩く) / タツノオトシゴ(藻の近くを漂う)も泳いでいます",
         "",
     ]
 }
@@ -1211,6 +1307,8 @@ fn draw_settings(out: &mut Stdout, ctl: &Ctl, cols: usize, rows: usize) -> std::
         ("効果音(SE)", ctl.sfx_on),
         ("ステータスオーバーレイ", ctl.overlay_on),
         ("自動モード(自動餌やり/投薬/ガラス叩き)", ctl.auto_on),
+        ("昼夜連動の照明変化", ctl.day_night_on),
+        ("自動魚補充(通常魚が減ったら自動追加)", ctl.auto_replenish_on),
     ];
     let title = "設定";
     let hint = "↑↓ 選択  Enter/Space 切替  Esc 閉じる";
@@ -1277,12 +1375,14 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "    f          カーソル位置から餌やり",
         "    m          カーソル位置から薬(病気の魚が触れると治癒)",
         "    t          ガラスを叩く(近くの魚が驚いて逃げる)",
+        "    T          トントン(近くの魚が興味を持って寄ってくる)",
         "    p          一時停止 / 再開",
         "    [ / ]      シミュレーション速度を下げる / 上げる",
         "    R          水槽グレートリセット(確認あり)",
         "    v          ステータスオーバーレイ(腹ペコ/病気/生命ゲージ)の表示切替",
         "    s          効果音(SE)のON/OFF",
         "    a          自動モード(自動餌やり/投薬/ガラス叩き)のON/OFF",
+        "    A          自動魚補充(通常魚が減ったら自動追加)のON/OFF",
         "    + / -      魚を1匹追加 / 間引く(ランダムな種類)",
         "    S          ピラニアを1匹確実に追加(25匹まで)",
         "    O          タコを1匹確実に追加(25匹まで)",
@@ -1416,6 +1516,20 @@ mod tests {
             assert!(
                 fallback_text.contains(name),
                 "図鑑フォールバック文言に「{name}」が含まれていないはず: dex_entries()に追加されたのにフォールバック文言の更新が漏れている"
+            );
+        }
+    }
+
+    // 実機フィードバック(「エビ・タツノオトシゴを追加したのに観賞用の行がカニのまま
+    // 取り残されていた」)の再発防止。図鑑フォールバック文言と同じ「テキスト一覧に
+    // 新要素が反映されていない」パターンなので、同様に回帰テストを置く。
+    #[test]
+    fn dex_fallback_text_mentions_all_decorative_background_creatures() {
+        let fallback_text = dex_fallback_lines().join("\n");
+        for name in ["カニ", "エビ", "タツノオトシゴ"] {
+            assert!(
+                fallback_text.contains(name),
+                "観賞用背景生物「{name}」がフォールバック文言に含まれていないはず"
             );
         }
     }
