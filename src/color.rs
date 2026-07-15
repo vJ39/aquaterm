@@ -68,6 +68,21 @@ pub fn apply_purifier_tint(c: Color, purifier_concentration: f64) -> Color {
     lerp(c, PURIFIER_TINT, t)
 }
 
+// クジラの死骸大爆発(ネタ枠)の演出用: 一時的に画面全体を真っ赤に染める色。
+pub const WHALE_EXPLOSION_FLASH_TINT: Color = Color::new(200, 0, 0);
+// 混色の最大値(発生直後)。水質の濁り(MURKY_MAX_MIX=0.85)より強く、ほぼ画面全体が
+// 真っ赤に見えるくらいまで染める。
+pub const WHALE_EXPLOSION_FLASH_MAX_MIX: f64 = 0.9;
+// intensity(0.0=消灯~1.0=発生直後の最大)に応じて、画面全体を真っ赤に染めるための
+// オーバーレイ。apply_murkiness/apply_purifier_tintと同じ「色を混ぜるだけ」の考え方だが、
+// 対象は水中の背景色だけでなく画面全体(魚・エフェクト等を含めた最終合成)に適用する
+// 想定のため、呼び出し側(main.rs)が全ピクセルに対して呼ぶ。減衰(フェード)自体は
+// 呼び出し側が計算し、ここには既に減衰済みのintensityを渡す。
+pub fn apply_whale_explosion_flash(c: Color, intensity: f64) -> Color {
+    let t = intensity.clamp(0.0, 1.0) * WHALE_EXPLOSION_FLASH_MAX_MIX;
+    lerp(c, WHALE_EXPLOSION_FLASH_TINT, t)
+}
+
 // 元気メーター用のグラデーション色(赤=低 → 黄=中 → 緑=高)
 pub const VITALITY_LOW: Color = Color::new(214, 48, 44); // 赤(瀕死)
 pub const VITALITY_MID: Color = Color::new(232, 198, 46); // 黄(普通)
@@ -226,6 +241,33 @@ mod tests {
         assert!(
             dist(dirty, MURKY_TINT) < dist(half, MURKY_TINT),
             "pollution_fracが大きいほど濁った色に近づくはず"
+        );
+    }
+
+    #[test]
+    fn apply_whale_explosion_flash_leaves_color_unchanged_when_intensity_is_zero() {
+        let c = WATER_MID;
+        assert_eq!(
+            apply_whale_explosion_flash(c, 0.0),
+            c,
+            "intensity=0.0(消灯)なら色は変化しないはず"
+        );
+    }
+
+    #[test]
+    fn apply_whale_explosion_flash_tints_toward_red_as_intensity_increases() {
+        let c = WATER_MID;
+        let flashed = apply_whale_explosion_flash(c, 1.0);
+        assert_ne!(flashed, c, "intensity=1.0(発生直後)なら色が変化するはず");
+        let half = apply_whale_explosion_flash(c, 0.5);
+        let dist = |a: Color, b: Color| {
+            ((a.r as i32 - b.r as i32).pow(2)
+                + (a.g as i32 - b.g as i32).pow(2)
+                + (a.b as i32 - b.b as i32).pow(2)) as f64
+        };
+        assert!(
+            dist(flashed, WHALE_EXPLOSION_FLASH_TINT) < dist(half, WHALE_EXPLOSION_FLASH_TINT),
+            "intensityが大きいほど真っ赤(WHALE_EXPLOSION_FLASH_TINT)に近づくはず"
         );
     }
 }

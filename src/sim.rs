@@ -221,6 +221,32 @@ pub const DEAD_SWAY_ANGULAR_SPEED: f64 = 1.4;
 // カニが亡骸を片付けた瞬間に出す分解演出の持続時間
 pub const CORPSE_DECOMPOSE_EFFECT_LIFETIME: f64 = 1.5;
 
+// --- クジラの死骸の大爆発(ネタ枠)。クジラの死骸が沈み切って水底に着地してから
+// 一定時間後、大爆発して水槽内の生き物を全滅させる仕組み。デバッグキー(`B`)で
+// この待ち時間を無視して即座に発火させることもできる。 ---
+// 着地(update_biology側のsettled_at_bottom検知)からこの時間(秒)経過すると大爆発する。
+pub const WHALE_EXPLOSION_DELAY: f64 = 60.0;
+// クジラ自身の肉片・血飛沫: ピラニアの捕食時の血飛沫演出パーツ(BLOOD_PARTICLE_COUNT・
+// BLOOD_SPREAD_RADIUS・BLOOD_EFFECT_LIFETIME)を流用しつつ、規模・残る時間を大幅に
+// 強化した専用バリエーション(main.rs側でEffectKind::WhaleGoreとして描画し、色も
+// 通常の血飛沫より一段濃い赤にする)。
+pub const WHALE_EXPLOSION_GORE_PARTICLE_COUNT: usize = 60; // 通常の血飛沫(10個)の6倍散らす
+pub const WHALE_EXPLOSION_GORE_SPREAD_RADIUS: f64 = 30.0; // 通常(6.0)の5倍広い範囲に飛び散る
+pub const WHALE_EXPLOSION_GORE_LIFETIME: f64 = 4.0; // 通常(1.6秒)より長く残る
+// クジラの爆発地点に残る巨大な血の滲み。通常の血の滲み(BLOOD_STAIN_MAX_RADIUS=20.0)
+// より一段大きく・濃い赤にした専用バリエーションで、main.rs側で別のVec
+// (whale_gore_stains)として描画する(ink_clouds/purify_bloomsと同じ、専用の
+// 定数・色を使うための分離)。
+pub const WHALE_EXPLOSION_STAIN_LIFETIME: f64 = 8.0;
+pub const WHALE_EXPLOSION_STAIN_MAX_RADIUS: f64 = 45.0;
+pub const WHALE_EXPLOSION_STAIN_GROWTH_TIME: f64 = 1.0; // 通常よりずっと速く一瞬でバッと広がる
+pub const WHALE_EXPLOSION_STAIN_HOLD_FRACTION: f64 = 0.6;
+pub const WHALE_EXPLOSION_STAIN_MIX: f64 = 0.97; // 通常の血の滲み(0.93)よりさらに濃い
+// 爆発の瞬間、画面全体を真っ赤に染める一時オーバーレイの持続時間。main.rs側で
+// color::apply_whale_explosion_flashへ渡すintensity(1.0=発生直後→0.0=消灯)の
+// 基準にする。
+pub const WHALE_EXPLOSION_FLASH_LIFETIME: f64 = 2.5;
+
 // --- 観賞用の追加生物(育成ロジック対象外。カニ・エビ・タツノオトシゴ。
 // 大型魚は Species::Piranha として通常の育成対象に統合された) ---
 pub const CRAB_COUNT: usize = 3;
@@ -751,6 +777,8 @@ pub enum EffectKind {
     Mate,  // つがいが出会って交尾する瞬間の演出(ハート)
     Hatch, // 卵が孵化(羽化)する瞬間の演出
     Decompose, // カニが水底の亡骸を片付ける瞬間の演出(分解して崩れる)
+    // クジラの死骸大爆発(ネタ枠)専用の肉片・血飛沫。Bloodの巨大・濃い赤バリエーション。
+    WhaleGore,
 }
 
 // f/m を押した瞬間、投下位置に一瞬だけ出る光/波紋の演出。常時表示のカーソルとは別物。
@@ -815,6 +843,7 @@ pub enum SfxEvent {
     Tap,         // カーソル位置を軽くノックした(とんとん)音。GlassKnockより柔らかく短い
     UiClick,     // 各種トグルをONにした瞬間の、乾いた小さいクリック音(やかましくないもの)
     StarPickup,  // スターを取得して無敵になった瞬間の、控えめなキラキラ音
+    WhaleExplosion, // クジラの死骸が大爆発した瞬間の、低く重い一発の爆発音
 }
 
 #[derive(Clone, Debug)]
@@ -967,6 +996,15 @@ pub struct Simulation {
     pub ink_clouds: Vec<InkCloud>,
     // 浄化ブルーム(浄化剤の着水演出。数秒で消えるので保存対象にしない)
     pub purify_blooms: Vec<PurifyBloom>,
+    // クジラ大爆発(ネタ枠)の巨大な血の滲み。通常の血の滲み(blood_stains)とは規模・
+    // 色の濃さが異なる専用の演出のため、描画側(main.rs)で別の定数・色を使えるように
+    // 別のVecに分けている(ink_clouds/purify_bloomsと同じ考え方)。数秒で消えるので
+    // 保存対象にしない。
+    pub whale_gore_stains: Vec<BloodStain>,
+    // クジラ大爆発(ネタ枠)の瞬間、一時的に画面全体を真っ赤に染めるオーバーレイの
+    // 残り時間(0以下で消灯)。WHALE_EXPLOSION_FLASH_LIFETIMEで開始し、時間経過で
+    // 0まで減衰する(main.rs側でintensityとして使う)。数秒で消えるので保存対象にしない。
+    pub whale_explosion_flash: f64,
     // このtickで発火した効果音イベント。main.rs 側が毎フレーム drain して再生する
     // (保存対象にしない。sim.rs は音の再生方法を知らない)。
     pub sound_events: Vec<SfxEvent>,
@@ -1110,6 +1148,8 @@ impl Simulation {
             blood_stains: Vec::new(),
             ink_clouds: Vec::new(),
             purify_blooms: Vec::new(),
+            whale_gore_stains: Vec::new(),
+            whale_explosion_flash: 0.0,
             sound_events: Vec::new(),
             rng,
             elapsed: 0.0,
@@ -2026,6 +2066,17 @@ impl Simulation {
         self.set_message("スターを投入した(デバッグ)");
     }
 
+    // デバッグ用: 存在するクジラ(生死は問わない)を最初に見つかった1匹を対象に、
+    // WHALE_EXPLOSION_DELAY(60秒)を待たずに即座に大爆発させる。クジラがいない
+    // 場合は何もしない。
+    pub fn debug_explode_whale(&mut self) {
+        let Some(idx) = self.fish.iter().position(|f| f.species == Species::Whale) else {
+            self.set_message("クジラがいない(デバッグ)");
+            return;
+        };
+        self.trigger_whale_explosion(idx);
+    }
+
     pub fn fish_count(&self) -> usize {
         self.fish.len()
     }
@@ -2082,6 +2133,10 @@ impl Simulation {
         self.update_stars(dt);
         self.update_cameos(dt, pix_w as f64, sand_top);
         self.update_biology(dt, cap, pix_w as f64, sand_top);
+        // クジラの死骸が着地後WHALE_EXPLOSION_DELAYを超えていたら大爆発させる。
+        // update_biology側のループ内では死骸1体のみを&mutで借用しているため、
+        // fish配列全体を書き換える大爆発処理は借用が終わった後のこのタイミングで行う。
+        self.check_whale_explosion();
         self.update_pollution(dt);
         // 浄化剤による水質浄化+濃度の希釈。水質と相互作用するのでupdate_pollutionの直後に置く。
         self.update_purifier_concentration(dt);
@@ -2446,6 +2501,12 @@ impl Simulation {
         // 発動済み(activated)のブルームは、以降は同心円状の広がり演出(main.rs側)にも
         // 均一な紫染め(purifier_concentration)にも二重に寄与しないよう、その場で取り除く。
         self.purify_blooms.retain(|b| !b.activated && b.life > 0.0);
+        for s in &mut self.whale_gore_stains {
+            s.life -= dt;
+        }
+        self.whale_gore_stains.retain(|s| s.life > 0.0);
+        // クジラ大爆発の画面フラッシュも同じく時間経過で減衰させ、0未満にはしない。
+        self.whale_explosion_flash = (self.whale_explosion_flash - dt).max(0.0);
     }
 
     // 遊泳: ランダムウォーク+慣性+壁反射+群れ+餌吸引(空腹度・病気で速度が変化)。
@@ -2549,6 +2610,11 @@ impl Simulation {
                     let sway_phase = f.dead_timer * DEAD_SWAY_ANGULAR_SPEED + f.age * 1.7;
                     f.x += DEAD_SWAY_AMPLITUDE * DEAD_SWAY_ANGULAR_SPEED * sway_phase.cos() * dt;
                     f.x = f.x.clamp(1.0, safe_upper(w - 1.0));
+                } else if f.species == Species::Whale {
+                    // クジラの死骸だけ、水底に着地してからの経過時間を計測する
+                    // (WHALE_EXPLOSION_DELAY経過で大爆発させる判定に使う。他種は
+                    // このタイマーを使わないため増やさない)。
+                    f.whale_landed_timer += dt;
                 }
                 f.y = f.y.clamp(1.0, bottom_y);
                 continue;
@@ -4253,6 +4319,102 @@ impl Simulation {
         }
     }
 
+    // クジラの死骸の大爆発(ネタ枠): 沈み切って水底に着地したクジラの死骸のうち、
+    // 着地からWHALE_EXPLOSION_DELAYを超えて経過したものを探し、最初に見つかった
+    // 1匹を大爆発させる(複数いる場合、残りは次tick以降に処理される)。
+    fn check_whale_explosion(&mut self) {
+        let target = self.fish.iter().position(|f| {
+            f.dead && f.species == Species::Whale && f.whale_landed_timer >= WHALE_EXPLOSION_DELAY
+        });
+        if let Some(idx) = target {
+            self.trigger_whale_explosion(idx);
+        }
+    }
+
+    // クジラの死骸の大爆発本体。以下を行う:
+    // (1) 爆発音を鳴らす (2) クジラ自身の巨大な肉片・血飛沫(ピラニアの捕食演出の
+    // 巨大・濃い赤バリエーション)を散らす (3) 水質を最悪(POLLUTION_MAX)まで悪化させる
+    // (4) 画面全体を真っ赤に染める一時オーバーレイを立てる (5) 画面内の生きている
+    // 全個体(fish配列の全種。クジラ以外の魚・ピラニア・タコを含む)を、ピラニアに
+    // 食われた時と同じ出血死アニメーションで即死させる (6) クジラの死骸自体は爆発で
+    // 消え、fish配列から除去する。呼び出し元(check_whale_explosion・
+    // debug_explode_whale)のいずれからも、対象のクジラは生死を問わず渡してよい。
+    fn trigger_whale_explosion(&mut self, whale_idx: usize) {
+        let wx = self.fish[whale_idx].x;
+        let wy = self.fish[whale_idx].y;
+
+        self.sound_events.push(SfxEvent::WhaleExplosion);
+
+        // (2) クジラ自身の肉片・血飛沫(通常の血飛沫より規模・色の濃さを強化した専用演出)
+        for _ in 0..WHALE_EXPLOSION_GORE_PARTICLE_COUNT {
+            let px = wx + self.rng.range(-WHALE_EXPLOSION_GORE_SPREAD_RADIUS, WHALE_EXPLOSION_GORE_SPREAD_RADIUS);
+            let py = wy
+                + self.rng.range(
+                    -WHALE_EXPLOSION_GORE_SPREAD_RADIUS * 0.6,
+                    WHALE_EXPLOSION_GORE_SPREAD_RADIUS * 0.6,
+                );
+            let particle_life = WHALE_EXPLOSION_GORE_LIFETIME * self.rng.range(0.6, 1.0);
+            self.drop_effects.push(DropEffect {
+                x: px,
+                y: py,
+                life: particle_life,
+                max_life: particle_life,
+                kind: EffectKind::WhaleGore,
+            });
+        }
+        self.whale_gore_stains.push(BloodStain {
+            x: wx,
+            y: wy,
+            life: WHALE_EXPLOSION_STAIN_LIFETIME,
+            max_life: WHALE_EXPLOSION_STAIN_LIFETIME,
+        });
+
+        // (3) 水質を最悪まで悪化させる
+        self.pollution = POLLUTION_MAX;
+
+        // (4) 画面全体を真っ赤に染める一時オーバーレイを立てる
+        self.whale_explosion_flash = WHALE_EXPLOSION_FLASH_LIFETIME;
+
+        // (5) 画面内の生きている全個体を、ピラニアに食われた時と同じ出血死アニメーション
+        // (通常のBLOOD_PARTICLE_COUNT・BLOOD_SPREAD_RADIUS・BLOOD_EFFECT_LIFETIME・
+        // BLOOD_STAIN_LIFETIMEをそのまま使う)で即死させる。クジラ自身(whale_idx)は
+        // 既に死亡済み(またはこの後(6)で除去される)ため対象外。
+        let mut victims = 0u32;
+        for i in 0..self.fish.len() {
+            if i == whale_idx || self.fish[i].dead {
+                continue;
+            }
+            let vx = self.fish[i].x;
+            let vy = self.fish[i].y;
+            self.fish[i].dead = true;
+            self.fish[i].dead_timer = 0.0;
+            victims += 1;
+            for _ in 0..BLOOD_PARTICLE_COUNT {
+                let px = vx + self.rng.range(-BLOOD_SPREAD_RADIUS, BLOOD_SPREAD_RADIUS);
+                let py = vy + self.rng.range(-BLOOD_SPREAD_RADIUS * 0.6, BLOOD_SPREAD_RADIUS * 0.6);
+                let particle_life = BLOOD_EFFECT_LIFETIME * self.rng.range(0.6, 1.0);
+                self.drop_effects.push(DropEffect {
+                    x: px,
+                    y: py,
+                    life: particle_life,
+                    max_life: particle_life,
+                    kind: EffectKind::Blood,
+                });
+            }
+            self.blood_stains.push(BloodStain {
+                x: vx,
+                y: vy,
+                life: BLOOD_STAIN_LIFETIME,
+                max_life: BLOOD_STAIN_LIFETIME,
+            });
+        }
+
+        // (6) クジラの死骸自体は爆発で消える
+        self.fish.remove(whale_idx);
+
+        self.set_message(format!("クジラが大爆発した…水槽内の{victims}匹が犠牲になった"));
+    }
+
     // 観賞用のカニ: 水底を左右に歩き、時々立ち止まる。育成ロジックには参加しない。
     fn update_crabs(&mut self, dt: f64, w: f64, sand_top: f64) {
         let margin = 3.0;
@@ -4367,7 +4529,11 @@ impl Simulation {
             let mut best_dist = f64::INFINITY;
             let mut best_fi = None;
             for (fi, f) in self.fish.iter().enumerate() {
-                if corpse_eaten[fi] || !f.dead || (bottom_y - f.y).abs() > 0.5 {
+                // クジラの死骸は片付け対象から除外する(WHALE_EXPLOSION_DELAY経過で
+                // 自ら大爆発して消えるため、カニに片付けられてしまうと爆発する機会が
+                // 失われてしまう)。
+                if corpse_eaten[fi] || !f.dead || f.species == Species::Whale || (bottom_y - f.y).abs() > 0.5
+                {
                     continue; // まだ浮いている/沈降中の亡骸は対象外(水底に落ち着くまで待つ)
                 }
                 let d = (f.x - c.x).abs();
@@ -11228,6 +11394,160 @@ mod tests {
             whale.render_scale(),
             1.0 + WHALE_BASE_SCALE_BONUS,
             "クジラのベース倍率はWHALE_BASE_SCALE_BONUS分だけ上乗せされるはず"
+        );
+    }
+
+    #[test]
+    fn crab_ignores_a_settled_whale_corpse() {
+        // クジラの死骸は水底に着地していても、通常の死骸のようにカニに片付けられては
+        // ならない(片付けられると大爆発の機会が失われてしまう)ことの回帰テスト。
+        let (w, h) = (80, 40);
+        let sand_top = h as f64 - sand_height(h) as f64;
+        let mut sim = Simulation::new(Rng::new(9401));
+        let mut whale = Fish::new(Species::Whale, Stage::Adult, 20.0, sand_top - 1.0);
+        whale.dead = true;
+        whale.dead_timer = CORPSE_REMOVE_TIME / 2.0; // 十分に沈み切っている想定
+        sim.fish.push(whale);
+        sim.crabs.push(Crab {
+            x: 20.0,
+            dir: 1.0,
+            pause_timer: 0.0,
+            facing_right: true,
+        });
+
+        sim.update_crabs(0.1, w as f64, sand_top);
+
+        assert_eq!(sim.fish_count(), 1, "クジラの死骸はカニに片付けられず残るはず");
+        assert!(
+            !sim.drop_effects.iter().any(|e| e.kind == EffectKind::Decompose),
+            "クジラの死骸は片付け対象外のため、分解演出も出ないはず"
+        );
+    }
+
+    #[test]
+    fn settled_whale_corpse_explodes_after_delay_and_maxes_out_pollution() {
+        // クジラの死骸が水底に着地してからWHALE_EXPLOSION_DELAY(60秒)経つと大爆発し、
+        // fish配列から消え、水質(pollution)が最悪(POLLUTION_MAX)まで悪化することの
+        // 回帰テスト。
+        let (w, h) = (80, 40);
+        let sand_top = h as f64 - sand_height(h) as f64;
+        let mut sim = Simulation::new(Rng::new(9402));
+        let mut whale = Fish::new(Species::Whale, Stage::Adult, 20.0, sand_top - 1.0);
+        whale.dead = true;
+        // 浮力がほぼ0になるくらい経過済みにしておき、初tickから着地判定になるようにする
+        // (CORPSE_REMOVE_TIME(24時間)そのものにすると、自動消滅判定の方が先に発火して
+        // しまうため、それより十分小さい値にする)。
+        whale.dead_timer = CORPSE_REMOVE_TIME / 2.0;
+        sim.fish.push(whale);
+
+        // WHALE_EXPLOSION_DELAY未満ではまだ爆発しない。
+        run(&mut sim, WHALE_EXPLOSION_DELAY - 1.0, 1.0, w, h, false);
+        assert_eq!(sim.fish_count(), 1, "着地後60秒未満ではまだ爆発しないはず");
+        assert!(
+            sim.pollution < POLLUTION_MAX,
+            "爆発前は水質が最悪になっていないはず(実際: {})",
+            sim.pollution
+        );
+
+        // 残りの猶予+余裕を進めると大爆発するはず。
+        run(&mut sim, 2.0, 1.0, w, h, false);
+        assert_eq!(
+            sim.fish_count(),
+            0,
+            "着地後60秒経過でクジラの死骸は大爆発してfish配列から消えるはず"
+        );
+        // 爆発直後にpollutionをPOLLUTION_MAXへ立てるが、同tick以降は自然浄化
+        // (POLLUTION_NATURAL_DECAY)がわずかに差し引くため、厳密な一致ではなく
+        // ほぼ最悪であることを確認する(他のpollution系テストと同じ許容の取り方)。
+        assert!(
+            sim.pollution >= POLLUTION_MAX - 1.0,
+            "大爆発で水質がほぼ最悪(POLLUTION_MAX)まで悪化するはず(実際: {})",
+            sim.pollution
+        );
+    }
+
+    #[test]
+    fn debug_explode_whale_triggers_immediately_without_waiting() {
+        // Bキー(debug_explode_whale)は、着地後60秒(WHALE_EXPLOSION_DELAY)を待たず、
+        // まだ生きているクジラであっても即座に大爆発させられることの回帰テスト。
+        let mut sim = Simulation::new(Rng::new(9403));
+        sim.fish.push(Fish::new(Species::Whale, Stage::Adult, 20.0, 10.0)); // まだ生きているクジラ
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 22.0, 10.0)); // 生きている他の魚
+
+        sim.debug_explode_whale();
+
+        assert!(
+            !sim.fish.iter().any(|f| f.species == Species::Whale),
+            "クジラ自身は大爆発でfish配列から消えるはず"
+        );
+        assert_eq!(
+            sim.fish_count(),
+            1,
+            "爆発で犠牲になった魚の死骸だけが残るはず"
+        );
+        assert!(sim.fish[0].dead, "残った個体は爆発で即死しているはず");
+        assert_eq!(
+            sim.pollution, POLLUTION_MAX,
+            "大爆発で水質が最悪(POLLUTION_MAX)まで悪化するはず"
+        );
+        assert!(
+            sim.whale_explosion_flash > 0.0,
+            "画面を真っ赤に染めるフラッシュが立つはず"
+        );
+        assert!(
+            !sim.whale_gore_stains.is_empty(),
+            "クジラ自身の巨大な血の滲みが残るはず"
+        );
+        assert!(
+            sim.drop_effects.iter().any(|e| e.kind == EffectKind::WhaleGore),
+            "クジラ自身の巨大な肉片・血飛沫(WhaleGore)が出るはず"
+        );
+        assert!(
+            sim.drop_effects.iter().any(|e| e.kind == EffectKind::Blood),
+            "犠牲になった他の魚には通常の出血死アニメーション(Blood)が出るはず"
+        );
+    }
+
+    #[test]
+    fn debug_explode_whale_does_nothing_when_no_whale_exists() {
+        // クジラが1匹もいない場合は何も起きない(既存のH/G等のデバッグキーが対象なし
+        // でも安全に無視するのと同じ方針)ことの回帰テスト。
+        let mut sim = Simulation::new(Rng::new(9404));
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 20.0, 10.0));
+
+        sim.debug_explode_whale();
+
+        assert_eq!(sim.fish_count(), 1, "クジラがいなければ何も起きないはず");
+        assert!(!sim.fish[0].dead, "クジラがいなければ他の魚も死なないはず");
+        assert_eq!(sim.pollution, 0.0, "クジラがいなければ水質も変化しないはず");
+    }
+
+    #[test]
+    fn whale_explosion_kills_every_other_living_fish_leaving_already_dead_ones_untouched() {
+        // 大爆発の瞬間、生きている他の全種(通常種・ピラニア・タコを含む)が即死する一方、
+        // 既に死んでいた個体(新たな死因ではない)はそのまま変化しないことの回帰テスト。
+        let mut sim = Simulation::new(Rng::new(9405));
+        sim.fish.push(Fish::new(Species::Whale, Stage::Adult, 20.0, 10.0));
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 22.0, 10.0));
+        sim.fish.push(Fish::new(Species::Piranha, Stage::Adult, 24.0, 10.0));
+        sim.fish.push(Fish::new(Species::Octopus, Stage::Adult, 26.0, 10.0));
+        let mut already_dead = Fish::new(Species::Guppy, Stage::Adult, 28.0, 10.0);
+        already_dead.dead = true;
+        already_dead.dead_timer = 5.0;
+        sim.fish.push(already_dead);
+
+        sim.debug_explode_whale();
+
+        // クジラ自身は爆発で消えるので、残るのは4匹(Neon/Piranha/Octopus/既に死んでいたGuppy)。
+        assert_eq!(sim.fish_count(), 4);
+        assert!(
+            sim.fish.iter().all(|f| f.dead),
+            "クジラ以外の全個体が死亡しているはず"
+        );
+        let guppy = sim.fish.iter().find(|f| f.species == Species::Guppy).unwrap();
+        assert_eq!(
+            guppy.dead_timer, 5.0,
+            "既に死んでいた個体の死亡タイマーは巻き戻らない(新たな死因ではない)はず"
         );
     }
 
