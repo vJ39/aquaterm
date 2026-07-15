@@ -623,7 +623,7 @@ impl Sprite {
             ],
             (Species::Piranha, Stage::Adult) => &[
                 "......FF......",
-                ".B...BBBB.....",
+                ".BB..BBBB.....",
                 "..BBBBBBBBB...",
                 ".BBBBBBBBBBB<.",
                 ".BBBBBBBBBBBBE",
@@ -890,8 +890,11 @@ fn palette(species: Species) -> Palette {
 // --- 観賞用の追加生物(育成ロジックには参加しない。見た目の賑やかしのみ) ---
 
 // カニのスプライト。水底を歩くだけの観賞用(育成ロジック対象外)。
+// 旧パターンは3x2の無地の四角(AEA/BBB)で、脚も爪も無く「カニ」と分かる
+// 手がかりが目にしか無かったため、両脇に伸びる爪(A)と甲羅下の脚(F)を
+// 追加してカニらしいシルエットにした。
 pub fn crab_sprite() -> Sprite {
-    let lines: &[&str] = &["AEA", "BBB"];
+    let lines: &[&str] = &[".A...A.", "AEBBBEA", ".F.F.F."];
     Sprite::parse(
         lines,
         Palette {
@@ -1014,10 +1017,10 @@ pub fn jellyfish_sprite() -> Sprite {
         ".ABBBBBA.",
         "ABBBBBBBA",
         ".BBBBBBB.",
-        "..A.A.A..",
         ".A.A.A.A.",
-        "A.A.A.A.A",
         ".A.A.A.A.",
+        ".A.A...A.",
+        ".A.....A.",
     ];
     Sprite::parse(
         lines,
