@@ -146,7 +146,7 @@ sudo apt install libasound2-dev pkg-config
 cargo test
 ```
 
-288 unit tests cover:
+290 unit tests cover:
 
 - 空腹度・成長・病気・繁殖・寿命
 - ピラニア・タコの捕食と逃走行動
