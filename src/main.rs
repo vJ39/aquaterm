@@ -630,6 +630,8 @@ fn render_tank(
     let plant_color = Color::new(55, 145, 75);
     let plant_color_dark = Color::new(38, 118, 60); // 奥の茎(重なりの奥行き表現)
     const PLANT_BLADE_OFFSETS: [f64; 9] = [-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0];
+    // 水流で藻が傾く量の倍率。先端(t=1)ほど大きく傾き、根元(t=0)は動かない。
+    const PLANT_CURRENT_LEAN_MULT: f64 = 0.6;
     for p in &sim.plants {
         let segs = p.height.round().max(2.0) as usize;
         // 束になった茎(株)を数本、根元のx位置をずらして描く。茎ごとに位相・高さ・
@@ -641,7 +643,9 @@ fn render_tank(
             for seg in 0..blade_segs {
                 let t = seg as f64 / blade_segs as f64; // 0(根元)〜1(先端側)
                 let sway = (sim.elapsed * sim::PLANT_SWAY_FREQ + blade_phase).sin() * t * 2.2;
-                let bx = p.x + blade_dx + sway;
+                // 揺れに加えて水流方向へ傾ける(先端ほど大きく傾く)。
+                let current_lean = sim.current_vx * PLANT_CURRENT_LEAN_MULT * t;
+                let bx = p.x + blade_dx + sway + current_lean;
                 let by = p.y - seg as f64;
                 put(fb, bx, by, color, w, h);
                 put(fb, bx + 1.0, by, color, w, h); // 1px幅の細い線に見えないよう太らせる
@@ -733,6 +737,34 @@ fn render_tank(
             w,
             h,
         );
+    }
+
+    // 水流の筋(可視化演出): 淡い青白の短い横線を、背景に薄く溶かして描く(はっきりした
+    // 実線ではなく、水が流れる揺らめきとして読めるようにする)。生成直後と消滅間際で薄く、
+    // 中間で最も濃くなる三角フェードにし、血飛沫・墨と同じく背景色へのlerpで混ぜる。
+    let streak_color = Color::new(200, 225, 240);
+    const STREAK_WIDTH: i32 = 4; // 横線の長さ(px)
+    for s in &sim.current_streaks {
+        let frac = if s.max_life > 0.0 {
+            (s.life / s.max_life).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // frac: 1.0(生成直後)→0.0(消滅)。中間(0.5)で最大になる三角フェード。
+        let fade = (1.0 - (2.0 * frac - 1.0).abs()).clamp(0.0, 1.0);
+        let alpha = fade * 0.5; // 全体に控えめ(うっすら揺らめく程度)
+        if alpha <= 0.02 {
+            continue;
+        }
+        let iy = s.y.round() as isize;
+        let base_x = s.x.round() as isize;
+        for dx in 0..STREAK_WIDTH {
+            let ix = base_x + dx as isize;
+            if ix >= 0 && iy >= 0 && (ix as usize) < w && (iy as usize) < h {
+                let bg = fb.get_pixel(ix as usize, iy as usize);
+                fb.set_pixel(ix as usize, iy as usize, lerp(bg, streak_color, alpha));
+            }
+        }
     }
 
     // 気泡(魚の後ろ)
