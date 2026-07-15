@@ -1312,7 +1312,9 @@ const DEN_SCALE: f64 = 1.4;
 // 岩をデフォルトで大きく描くための拡大率。魚が十分に隠れられる大きさにしてほしい
 // という再指摘への対応(藻はheightの拡大で対応済みだが、岩はheightのような
 // サイズフィールドを持たない固定スプライトのため、タコつぼと同じ拡大描画で対応する)。
-const ROCK_SCALE: f64 = 1.8;
+// それでもまだ小さいとの再指摘を受けて、藻の再拡大(Plant.height)に合わせてさらに
+// 拡大率を上げた(旧1.8→2.8)。
+const ROCK_SCALE: f64 = 2.8;
 fn draw_sprite_scaled(fb: &mut FrameBuffer, sprite: &fish::Sprite, cx: f64, cy: f64, scale: f64, w: usize, h: usize) {
     let out_w = ((sprite.width as f64) * scale).round().max(1.0) as usize;
     let out_h = ((sprite.height as f64) * scale).round().max(1.0) as usize;
