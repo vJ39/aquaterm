@@ -564,6 +564,16 @@ impl Fish {
 // 切り替えて見た目の一貫性を保つ(fish.rs内でのみ使う定数)。
 const BIG_ADULT_GROWTH_STAGE: u8 = 2;
 
+// 「完全に成長しきった」個体(成長段階が最大値に達した個体)だけを対象に、
+// BIG_ADULT_GROWTH_STAGE以降の高解像度パターンよりさらに一段精細な専用
+// パターンに切り替える閾値。growth_stageが取り得る最大値(sim.rs側の
+// GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE)そのものを使う(この段階を
+// 超えるgrowth_stageは存在しないため、独自の値を別途持つ必要はない)。
+// 対象は既にBIG_ADULT高解像度パターンを持つ通常種のうちネオン・金魚・
+// グッピー・ベタの4種のみ。エンゼルフィッシュは縦縞の連続性が崩れて
+// 見える懸念があり、実際にレンダリングして確認した上で今回は対象外とした。
+const MAX_ADULT_GROWTH_STAGE: u8 = GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE;
+
 // 方向転換の演出中に見せる、真横向きとは別の一時的な向き。画面手前(視聴者側)を
 // 向く「正面向き」と、画面奥へ向き直る「背面向き」の2段階(Fish::turn_poseが
 // 経過時間から選ぶ)に加えて、どちら向きへ旋回している最中か(右→左/左→右)で
@@ -692,6 +702,26 @@ impl Sprite {
                 ".FBBBBB..",
                 "FF.BB....",
             ],
+            // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体だけは、BIG_ADULTの
+            // 高解像度パターンよりもさらに一段精細な専用パターンに切り替える。
+            // 同じ紡錘形+浅いフォーク尾の構図をそのまま、行・列を約1.22倍に
+            // 増やして描き直したもの(2倍だと基のスプライトごと大きくなりすぎるため
+            // 控えめに留めている)。この判定はBIG_ADULT判定より先に書く必要がある
+            // (growth_stageがMAX_ADULT_GROWTH_STAGEの個体はBIG_ADULTの条件も
+            // 満たすため、matchの順序がそのまま優先順位になる)。
+            (Species::Neon, Stage::Adult) if growth_stage >= MAX_ADULT_GROWTH_STAGE => &[
+                "FF.....FFFFF..........",
+                "FFFF.BBBBBBBBBB.......",
+                ".FFFBBBBBBBBBBBBB.....",
+                ".FFFBBBBBBBBBBBBB.....",
+                "..FFBBBAAAAAAAABBBBB..",
+                "....BBBAAAAAAAABBBBBBE",
+                "..FFBBBAAAAAAAABBBBB..",
+                ".FFFBBBBBBBBBBBBB.....",
+                ".FFFBBBBBBBBBBBBB.....",
+                "FFFF.BBBBBBBBBB.......",
+                "FF.....FFFFF..........",
+            ],
             // 成長段階が上がって大きく表示されるほど、低解像度パターンの拡大では
             // 模様が潰れて間延びする。BIG_ADULT_GROWTH_STAGE以降は、同じ紡錘形の
             // 構図を一回り高い解像度で描き直した専用パターンに切り替える。
@@ -728,6 +758,26 @@ impl Sprite {
             // 尾びれ(F)を左側にまとまった扇状に配置して尾とわかるようにし、
             // 体(B)は丸みのある卵形のまま、頭側(右・目のある側)は尾側より少し
             // すぼめて前後の区別がつくようにした。
+            // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体専用の、BIG_ADULTより
+            // さらに一段精細なパターン(Neonと同じ約1.22倍・行列を増やしただけで
+            // シルエット自体は変えていない)。
+            (Species::Goldfish, Stage::Adult) if growth_stage >= MAX_ADULT_GROWTH_STAGE => &[
+                "......FFFFF...............",
+                "....FFFFFBBBBBBBB.........",
+                "..FFFFBBBBBBBBBBBBBB......",
+                "..FFFFBBBBBBBBBBBBBB......",
+                ".FFFBBBBBBBBBBBBBBBBBB....",
+                ".FBBBBBBBBBBBBBBBBBBBBBB..",
+                "FBBBBBBBBBBAAAAAABBBBBBBE.",
+                "FBBBBBBBBBBAAAAAABBBBBBBE.",
+                "FBBBBBBBBBBAAAAAABBBBBBBE.",
+                ".FBBBBBBBBBBBBBBBBBBBBBB..",
+                ".FFFBBBBBBBBBBBBBBBBBB....",
+                "..FFFFBBBBBBBBBBBBBB......",
+                "..FFFFBBBBBBBBBBBBBB......",
+                "....FFFFFBBBBBBBB.........",
+                "......FFFFF...............",
+            ],
             // BIG_ADULT_GROWTH_STAGE以降は高解像度の専用パターンに切り替える。
             // 左に扇状の尾びれ(F)、丸みのある卵形の体(B)、右の目(E)という
             // 金魚らしいシルエットはそのままに、腹のアクセント(A)を一回り
@@ -768,6 +818,24 @@ impl Sprite {
                 "FFFBABBE",
                 "FFFBBB..",
                 "FF.B....",
+            ],
+            // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体専用の、BIG_ADULTより
+            // さらに一段精細なパターン(Neonと同じ約1.22倍・行列を増やしただけで
+            // シルエット自体は変えていない)。
+            (Species::Guppy, Stage::Adult) if growth_stage >= MAX_ADULT_GROWTH_STAGE => &[
+                "FF........FF............",
+                "FFFFF...BBBBBB..........",
+                "FFFFFFBBBBBBBBBBB.......",
+                "FFFFFFBBBBBBBBBBB.......",
+                "FFFFFFBBBBBBBBBBBBB.....",
+                "FFFFFFBBAAAAABBBBBBBBB..",
+                "FFFFFFBBAAAAABBBBBBBBBBE",
+                "FFFFFFBBAAAAABBBBBBBBB..",
+                "FFFFFFBBBBBBBBBBBBB.....",
+                "FFFFFFBBBBBBBBBBB.......",
+                "FFFFFFBBBBBBBBBBB.......",
+                "FFFFF...BBBBBB..........",
+                "FF........FF............",
             ],
             // BIG_ADULT_GROWTH_STAGE以降は高解像度の専用パターンに切り替える。
             (Species::Guppy, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
@@ -894,6 +962,24 @@ impl Sprite {
             // 一点だけに絞り、色も紫からベタらしい赤+青の対比に変更した
             // (パレット側のaccentも参照)。周囲のヒレ(F)はそのまま活かし、
             // 「体は小さく、ヒレが大きく優雅に広がる」印象を保つ。
+            // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体専用の、BIG_ADULTより
+            // さらに一段精細なパターン(Neonと同じ約1.22倍・行列を増やしただけで
+            // シルエット自体は変えていない)。
+            (Species::Betta, Stage::Adult) if growth_stage >= MAX_ADULT_GROWTH_STAGE => &[
+                "........FFFFFF..........",
+                "......FFFFFFFFFFF.......",
+                "....FFFBBBBBBBBBBFF.....",
+                "....FFFBBBBBBBBBBFF.....",
+                "..FFFBBBBBBBBBBBBBBFFF..",
+                ".FFFBBBBBBBBBBBBBBBBFFF.",
+                "<FFFBBBBBBBAABBBBBBBFFFE",
+                ".FFFBBBBBBBBBBBBBBBBFFF.",
+                "..FFFBBBBBBBBBBBBBBFFF..",
+                "....FFFBBBBBBBBBBFF.....",
+                "....FFFBBBBBBBBBBFF.....",
+                "......FFFFFFFFFFF.......",
+                ".......FFFF..FFFF.......",
+            ],
             // BIG_ADULT_GROWTH_STAGE以降は高解像度の専用パターンに切り替える。
             // ベタの見どころは大きく優雅に広がるヒレ(F)なので、上下・周囲に
             // 流れるヒレを一回り大きく描き、体(B)は中庸に、中央のアクセント(A)は
@@ -1739,6 +1825,82 @@ mod tests {
                 fish.render_scale()
             );
         }
+    }
+
+    // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体を持つ4種(ネオン・金魚・
+    // グッピー・ベタ)は、BIG_ADULT_GROWTH_STAGEの高解像度パターンよりさらに
+    // 一回り大きい専用パターンに切り替わるはず。ただし基準(growth_stage=0)から
+    // 大きくなりすぎないよう、縦横ともに2倍未満に収めていることも確認する
+    // (2倍だと図鑑のグリッド計算が壊れるという過去の教訓を踏まえた上限)。
+    #[test]
+    fn max_adult_species_switch_to_an_even_bigger_but_not_oversized_sprite() {
+        for &sp in &[Species::Neon, Species::Goldfish, Species::Guppy, Species::Betta] {
+            let mut base = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            base.growth_stage = 0;
+            let base_sprite = base.sprite();
+
+            let mut big = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            big.growth_stage = BIG_ADULT_GROWTH_STAGE;
+            let big_sprite = big.sprite();
+
+            let mut max_adult = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            max_adult.growth_stage = MAX_ADULT_GROWTH_STAGE;
+            let max_sprite = max_adult.sprite();
+
+            assert!(
+                max_sprite.width > big_sprite.width && max_sprite.height > big_sprite.height,
+                "{sp:?}: 完全成長個体はBIG_ADULTより幅・高さともに大きいはず (big={}x{}, max={}x{})",
+                big_sprite.width, big_sprite.height, max_sprite.width, max_sprite.height
+            );
+            assert!(
+                max_sprite.width < base_sprite.width * 2 && max_sprite.height < base_sprite.height * 2,
+                "{sp:?}: 完全成長個体も基準の縦横2倍未満に収めるはず (base={}x{}, max={}x{})",
+                base_sprite.width, base_sprite.height, max_sprite.width, max_sprite.height
+            );
+        }
+    }
+
+    // 完全成長個体の高解像度スプライトへの切り替え直後(growth_stage=
+    // MAX_ADULT_GROWTH_STAGE)も、BIG_ADULTの場合と同じく、スプライト自体が
+    // すでに大きいので追加の拡大描画はほぼ不要になるはず(intrinsic_sprite_scale
+    // がこの新しい段階でも正しく相殺できていることの確認)。
+    #[test]
+    fn max_adult_high_resolution_sprite_is_not_scaled_twice() {
+        for &sp in &[Species::Neon, Species::Goldfish, Species::Guppy, Species::Betta] {
+            let mut fish = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            fish.growth_stage = MAX_ADULT_GROWTH_STAGE;
+            assert!(
+                fish.render_scale() <= 1.1,
+                "{sp:?}: 完全成長個体の高解像度スプライトへ切り替えた直後は追加拡大をほぼ行わないはず: {}",
+                fish.render_scale()
+            );
+        }
+    }
+
+    // エンゼルフィッシュは、縦縞の連続性が崩れて見える懸念があるため今回の
+    // MAX_ADULT_GROWTH_STAGE専用パターンの対象外にした。growth_stageが
+    // MAX_ADULT_GROWTH_STAGEに達しても、BIG_ADULT_GROWTH_STAGEと全く同じ
+    // スプライト(次元・ピクセル内容とも)が返り続けることを確認する
+    // (対象外であることの回帰テスト)。
+    #[test]
+    fn angelfish_is_excluded_from_the_max_adult_tier() {
+        let mut big = Fish::new(Species::Angelfish, Stage::Adult, 0.0, 0.0);
+        big.growth_stage = BIG_ADULT_GROWTH_STAGE;
+        let big_sprite = big.sprite();
+
+        let mut max_adult = Fish::new(Species::Angelfish, Stage::Adult, 0.0, 0.0);
+        max_adult.growth_stage = MAX_ADULT_GROWTH_STAGE;
+        let max_sprite = max_adult.sprite();
+
+        assert_eq!(
+            (big_sprite.width, big_sprite.height),
+            (max_sprite.width, max_sprite.height),
+            "エンゼルフィッシュはMAX_ADULT_GROWTH_STAGEでもBIG_ADULTと同じ寸法のはず(対象外)"
+        );
+        assert_eq!(
+            big_sprite.pixels, max_sprite.pixels,
+            "エンゼルフィッシュはMAX_ADULT_GROWTH_STAGEでもBIG_ADULTと同じピクセル内容のはず(対象外)"
+        );
     }
 
     // render_scaleは常に1.0以上でなければならない(1.0未満だとドットが間引かれて
