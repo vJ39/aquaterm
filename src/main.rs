@@ -1033,7 +1033,9 @@ fn render_tank(
             .fold(f64::INFINITY, f64::min);
         let hide_alpha = (1.0 - nearest_cover_dist / sim::ALGAE_HIDE_RADIUS).clamp(0.0, 1.0)
             * sim::ALGAE_HIDE_MIX;
-        let sprite = f.sprite();
+        // 実際の描画には、方向転換の一瞬だけ前向き/背面向きに切り替わる
+        // display_sprite()を使う(壁際マージン等の判定に使うsprite()とは別物)。
+        let sprite = f.display_sprite();
         let scale = f.render_scale();
         let out_w = ((sprite.width as f64) * scale).round().max(1.0) as isize;
         let out_h = ((sprite.height as f64) * scale).round().max(1.0) as isize;

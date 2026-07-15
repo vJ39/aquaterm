@@ -714,6 +714,16 @@ pub const DASH_DURATION: f64 = 0.35; // ダッシュ自体は一瞬だけ
 pub const DASH_STRENGTH: f64 = 640.0; // ダッシュ方向への加速の強さ
 pub const DASH_SPEED_MULT: f64 = 1.5; // ダッシュ中、最高速度が一時的にこの倍率になる
 
+// --- 方向転換(左右反転)時の前向き/背面向き遷移スプライト ---
+// facing_right が反転した瞬間、真横向きから反対の真横向きへ即座に切り替わるのではなく、
+// 実際の魚が体を捻って向きを変える際の見た目に近づけるため、一瞬「画面奥へ向き直る」
+// 背面向きを経てから「画面手前を向く」正面向きを経由し、その後で新しい向きの通常の
+// 横向きプロファイルに戻す(fish.rs の Fish::turn_pose が経過時間からどちらのポーズかを
+// 判定する。この演出はFish::display_sprite側だけに閉じ、Fish::sprite/render_scale等の
+// 判定用の値には影響させない)。
+pub const TURN_FACING_DURATION: f64 = 0.34; // ターン演出全体の時間(秒)
+pub const TURN_FACING_BACK_FRACTION: f64 = 0.3; // このうち反転直後の前半分は背面向きを一瞬挟む
+
 // --- ガラスを叩く「叩きすぎ」ペナルティ(ストレス) ---
 // 短時間に何度も t を連打すると、ストレスとして周辺の魚に病気発症のボーナスを与える。
 // 稀にしか叩かない通常利用では閾値に届かず影響が出ない。
@@ -3427,10 +3437,21 @@ impl Simulation {
             let y_bottom_bound = safe_upper((sand_top - bottom_edge_margin).max(top_edge_margin));
             f.x = f.x.clamp(x_margin.min(x_bound), x_bound);
             f.y = f.y.clamp(top_edge_margin.min(y_bottom_bound), y_bottom_bound);
-            // 進行方向で左右反転(微小速度では維持)
+            // ターン演出(前向き/背面向き遷移スプライト)の残り時間を減らす。
+            f.turn_facing_timer = (f.turn_facing_timer - dt).max(0.0);
+            // 進行方向で左右反転(微小速度では維持)。反転した瞬間だけ、真横向きから
+            // 反対の真横向きへの即時切り替えではなく、一瞬前向き/背面向きスプライトを
+            // 経由するターン演出タイマーを立てる(fish.rs の Fish::display_sprite が
+            // 消費する。物理判定に使うFish::sprite/render_scale等には影響させない)。
             if f.vx > 0.6 {
+                if !f.facing_right {
+                    f.turn_facing_timer = TURN_FACING_DURATION;
+                }
                 f.facing_right = true;
             } else if f.vx < -0.6 {
+                if f.facing_right {
+                    f.turn_facing_timer = TURN_FACING_DURATION;
+                }
                 f.facing_right = false;
             }
             let _ = hungry;

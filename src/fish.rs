@@ -7,7 +7,8 @@ use crate::sim::{
     GENERAL_GROWTH_SCALE_STEP, GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE, HUNGRY_THRESHOLD, MAX_HUNGER,
     OCTOPUS_BASE_SCALE_BONUS, OCTOPUS_BITE_SPEED_MULT, PIRANHA_BITE_SPEED_MULT,
     PIRANHA_KILL_GROWTH_SCALE_STEP,
-    PIRANHA_MAX_KILL_STAGE, SIZE_SPEED_PENALTY_STEP, WHALE_BASE_SCALE_BONUS,
+    PIRANHA_MAX_KILL_STAGE, SIZE_SPEED_PENALTY_STEP, TURN_FACING_BACK_FRACTION,
+    TURN_FACING_DURATION, WHALE_BASE_SCALE_BONUS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +116,11 @@ pub struct Fish {
     pub vx: f64,
     pub vy: f64,
     pub facing_right: bool,
+    // 方向転換(facing_rightの反転)の直後、通常の左右プロファイルへ即座に切り替える
+    // 代わりに前向き/背面向きスプライトを一瞬経由させるための残り時間。0の間は
+    // 通常表示(sim.rsのupdate_movementがfacing_right反転の瞬間にセットする)。
+    #[serde(default)]
+    pub turn_facing_timer: f64,
     // 満腹を維持している時間(成長・繁殖の判定に使う)
     pub well_fed_timer: f64,
     // 空腹度0が続いている時間(弱り・死亡判定に使う)
@@ -288,6 +294,7 @@ impl Fish {
             vx: 0.0,
             vy: 0.0,
             facing_right: true,
+            turn_facing_timer: 0.0,
             well_fed_timer: 0.0,
             starve_timer: 0.0,
             sick: false,
@@ -338,9 +345,43 @@ impl Fish {
         }
     }
 
-    // 描画用スプライト(種類×成長段階)
+    // 論理スプライト(種類×成長段階)。壁際マージン・render_scale・口の位置など、
+    // 見た目ではなく判定に使う箇所はこちらを参照する。方向転換の一瞬だけ見せる
+    // 前向き/背面向き演出(display_sprite)の影響を受けない、常に通常の左右
+    // プロファイルを返す(演出でサイズが変わって判定がガタつかないようにするため)。
     pub fn sprite(&self) -> Sprite {
         Sprite::for_fish(self.species, self.stage, self.growth_stage)
+    }
+
+    // 実際に画面へ描く描画専用スプライト。方向転換の直後(turn_facing_timer>0)は、
+    // 対応する種であれば通常の左右プロファイルの代わりに前向き/背面向きの
+    // 遷移スプライトを返す(無ければ通常スプライトにフォールバックする)。
+    // 呼び出しは描画箇所(main.rsのrender_tank)だけに限定し、壁際マージン等の
+    // 判定にはsprite()(常に通常プロファイル)を使う。
+    pub fn display_sprite(&self) -> Sprite {
+        if let Some(pose) = self.turn_pose() {
+            if let Some(turning) = Sprite::for_turning_fish(self.species, self.stage, pose) {
+                return turning;
+            }
+        }
+        self.sprite()
+    }
+
+    // 方向転換の演出中かどうか、かつどちらのポーズを見せるべきか。
+    // turn_facing_timerはセット直後がTURN_FACING_DURATION、0になるまで
+    // 減っていくカウントダウン式なので、経過時間はTURN_FACING_DURATIONからの
+    // 差分で求める。反転直後の短い前半分だけ背面向き(画面奥)を挟み、
+    // 残りの後半分は正面向き(画面手前)を見せてから通常表示に戻る。
+    fn turn_pose(&self) -> Option<TurnPose> {
+        if self.turn_facing_timer <= 0.0 {
+            return None;
+        }
+        let elapsed = (TURN_FACING_DURATION - self.turn_facing_timer).max(0.0);
+        if elapsed < TURN_FACING_DURATION * TURN_FACING_BACK_FRACTION {
+            Some(TurnPose::Back)
+        } else {
+            Some(TurnPose::Front)
+        }
     }
 
     // 空腹度の段階
@@ -491,6 +532,84 @@ impl Fish {
 // 拡大ではなく専用の高解像度パターンに切り替える。全種で同じ段階で
 // 切り替えて見た目の一貫性を保つ(fish.rs内でのみ使う定数)。
 const BIG_ADULT_GROWTH_STAGE: u8 = 2;
+
+// 方向転換の演出中に見せる、真横向きとは別の一時的な向き。画面手前(視聴者側)を
+// 向く「正面向き」と、画面奥へ向き直る「背面向き」の2種類(Fish::turn_poseが
+// 経過時間から選ぶ)。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TurnPose {
+    Front, // 画面手前(視聴者側)を向く
+    Back,  // 画面奥を向く
+}
+
+// ネオン・金魚・グッピー・ピラニアで共用する、方向転換演出用の正面向きパターン。
+// 体高のある左右対称な楕円(B)に、上下のヒレ(F)、中央に目2つ(E)と鼻先/口の
+// アクセント(A)を置いただけのシンプルな構図(色は各種のpalette()で決まる)。
+const TURN_FACING_STANDARD_FRONT: &[&str] = &[
+    "...FFF...",
+    "..FBBBF..",
+    ".FBBBBBF.",
+    "FBBEAEBBF",
+    ".FBBBBBF.",
+    "..FBBBF..",
+    "...FFF...",
+];
+
+// 上記の背面向き版。振り向いた後ろ姿なので目(E)は見せず、中央に背筋の
+// アクセント(A)の縦筋だけを残す。
+const TURN_FACING_STANDARD_BACK: &[&str] = &[
+    "...FFF...",
+    "..FBBBF..",
+    ".FBBABBF.",
+    "FBBBABBBF",
+    ".FBBABBF.",
+    "..FBBBF..",
+    "...FFF...",
+];
+
+// エンゼルフィッシュの正面向き。長く伸びるヒレ・縞模様(A)が特徴のため、
+// 標準パターンよりAの面積を広げ、端まで届く長いヒレ(F)を持たせている。
+const TURN_FACING_ANGELFISH_FRONT: &[&str] = &[
+    "...FFF...",
+    "..FAAAF..",
+    ".FABBBAF.",
+    "FABEAEBAF",
+    ".FABBBAF.",
+    "..FAAAF..",
+    "...FFF...",
+];
+
+const TURN_FACING_ANGELFISH_BACK: &[&str] = &[
+    "...FFF...",
+    "..FAAAF..",
+    ".FABBBAF.",
+    "FABBABBAF",
+    ".FABBBAF.",
+    "..FAAAF..",
+    "...FFF...",
+];
+
+// ベタの正面向き。優雅に広がる大きなヒレ(F)が主役なので、標準パターンより
+// ひと回り大きく、体(B)を小さく・ヒレの面積を大きく取っている。
+const TURN_FACING_BETTA_FRONT: &[&str] = &[
+    "....FFFFF....",
+    "...FFBBBFF...",
+    "..FFBBBBBFF..",
+    ".FFBBEAEBBFF.",
+    "..FFBBBBBFF..",
+    "...FFBBBFF...",
+    "....FFFFF....",
+];
+
+const TURN_FACING_BETTA_BACK: &[&str] = &[
+    "....FFFFF....",
+    "...FFBBBFF...",
+    "..FFBBBBBFF..",
+    ".FFBBBABBBFF.",
+    "..FFBBBBBFF..",
+    "...FFBBBFF...",
+    "....FFFFF....",
+];
 
 // ドットマトリクスのスプライト。原点は左上、facing で左右反転する。
 pub struct Sprite {
@@ -809,6 +928,33 @@ impl Sprite {
         Sprite::parse(lines, palette(species))
     }
 
+    // 方向転換の演出中に使う前向き(画面手前)/背面向き(画面奥)のスプライト。
+    // 真横向き(for_fish)とは別に、体高のある左右対称な楕円+目(前向きのみ)という
+    // シンプルな構図で描く。対象は通常種(COMMON)とピラニアの成魚のみ(稚魚・
+    // タコ・クジラは今回のスコープ外)で、該当しない組み合わせはNoneを返し
+    // 呼び出し側(Fish::sprite)が通常スプライトへフォールバックする。
+    fn for_turning_fish(species: Species, stage: Stage, pose: TurnPose) -> Option<Sprite> {
+        if stage != Stage::Adult {
+            return None;
+        }
+        let lines: &[&str] = match (species, pose) {
+            (Species::Neon, TurnPose::Front)
+            | (Species::Goldfish, TurnPose::Front)
+            | (Species::Guppy, TurnPose::Front)
+            | (Species::Piranha, TurnPose::Front) => TURN_FACING_STANDARD_FRONT,
+            (Species::Neon, TurnPose::Back)
+            | (Species::Goldfish, TurnPose::Back)
+            | (Species::Guppy, TurnPose::Back)
+            | (Species::Piranha, TurnPose::Back) => TURN_FACING_STANDARD_BACK,
+            (Species::Angelfish, TurnPose::Front) => TURN_FACING_ANGELFISH_FRONT,
+            (Species::Angelfish, TurnPose::Back) => TURN_FACING_ANGELFISH_BACK,
+            (Species::Betta, TurnPose::Front) => TURN_FACING_BETTA_FRONT,
+            (Species::Betta, TurnPose::Back) => TURN_FACING_BETTA_BACK,
+            (Species::Octopus, _) | (Species::Whale, _) => return None,
+        };
+        Some(Sprite::parse(lines, palette(species)))
+    }
+
     // 文字列スプライトを解析する。'.'/' ' は透明。
     fn parse(lines: &[&str], pal: Palette) -> Sprite {
         let height = lines.len();
@@ -1064,6 +1210,130 @@ pub fn jellyfish_sprite() -> Sprite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Fish::sprite()(壁際マージン・render_scale・口の位置など判定用)は、
+    // turn_facing_timerの値に関わらず常に通常の横向きプロファイルと一致する
+    // はず(方向転換演出は見た目(display_sprite)だけに閉じ、物理判定に
+    // ちらつきを持ち込まないための不変条件)。
+    #[test]
+    fn sprite_always_returns_the_normal_profile_regardless_of_turn_state() {
+        for &sp in &[
+            Species::Neon,
+            Species::Goldfish,
+            Species::Guppy,
+            Species::Piranha,
+            Species::Angelfish,
+            Species::Betta,
+            Species::Octopus,
+            Species::Whale,
+        ] {
+            for &stage in &[Stage::Fry, Stage::Adult] {
+                let mut fish = Fish::new(sp, stage, 0.0, 0.0);
+                let normal = Sprite::for_fish(sp, stage, fish.growth_stage);
+                for &timer in &[0.0, TURN_FACING_DURATION * 0.1, TURN_FACING_DURATION] {
+                    fish.turn_facing_timer = timer;
+                    let actual = fish.sprite();
+                    assert_eq!(
+                        (actual.width, actual.height, &actual.pixels),
+                        (normal.width, normal.height, &normal.pixels),
+                        "{sp:?}/{stage:?}: turn_facing_timer={timer}でもsprite()は通常プロファイルのはず"
+                    );
+                }
+            }
+        }
+    }
+
+    // display_sprite()(実際の描画に使う)は、turn_facing_timerが0(方向転換して
+    // いない)間は、対象種かどうかに関わらず通常の横向きプロファイルと完全に一致し
+    // 続けるはず(対象外の稚魚・タコ・クジラも含めて、この演出の追加が既存の
+    // 見た目に影響しないことの確認)。
+    #[test]
+    fn display_sprite_matches_normal_profile_when_not_turning() {
+        for &sp in &[
+            Species::Neon,
+            Species::Goldfish,
+            Species::Guppy,
+            Species::Piranha,
+            Species::Angelfish,
+            Species::Betta,
+            Species::Octopus,
+            Species::Whale,
+        ] {
+            for &stage in &[Stage::Fry, Stage::Adult] {
+                let fish = Fish::new(sp, stage, 0.0, 0.0);
+                assert_eq!(fish.turn_facing_timer, 0.0);
+                let normal = Sprite::for_fish(sp, stage, fish.growth_stage);
+                let actual = fish.display_sprite();
+                assert_eq!(
+                    (actual.width, actual.height, &actual.pixels),
+                    (normal.width, normal.height, &normal.pixels),
+                    "{sp:?}/{stage:?}: turn_facing_timer=0のときはdisplay_sprite()も通常スプライトと一致するはず"
+                );
+            }
+        }
+    }
+
+    // 方向転換の対象種(通常5種+ピラニアの成魚)は、facing_right反転の瞬間
+    // (turn_facing_timer=TURN_FACING_DURATION)にdisplay_sprite()が通常プロファイル
+    // とは異なる遷移スプライト(まず背面向き)に入り、時間が経つと正面向きへ移り、
+    // タイマーが切れると通常プロファイルへ戻ることを確認する。この間、sprite()
+    // (判定用)は常に通常プロファイルのまま変わらないことも合わせて確認する。
+    #[test]
+    fn turning_species_show_back_then_front_pose_then_revert_to_normal() {
+        for &sp in &[
+            Species::Neon,
+            Species::Goldfish,
+            Species::Guppy,
+            Species::Piranha,
+            Species::Angelfish,
+            Species::Betta,
+        ] {
+            let mut fish = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            let normal = Sprite::for_fish(sp, Stage::Adult, 0);
+
+            // 反転した瞬間: 前半分(背面向き)に入っているはず。
+            fish.turn_facing_timer = TURN_FACING_DURATION;
+            assert_eq!(fish.turn_pose(), Some(TurnPose::Back), "{sp:?}: 反転直後は背面向きのはず");
+            let back = fish.display_sprite();
+            assert_ne!(
+                (back.width, back.height, &back.pixels),
+                (normal.width, normal.height, &normal.pixels),
+                "{sp:?}: 背面向き中は通常プロファイルと異なるはず"
+            );
+            let logical_during_back = fish.sprite();
+            assert_eq!(
+                (logical_during_back.width, logical_during_back.height, &logical_during_back.pixels),
+                (normal.width, normal.height, &normal.pixels),
+                "{sp:?}: 背面向き中もsprite()(判定用)は通常プロファイルのままのはず"
+            );
+
+            // 背面向きの時間が過ぎたあと: 正面向きに入っているはず。
+            let front_timer = TURN_FACING_DURATION * (1.0 - TURN_FACING_BACK_FRACTION) - 0.001;
+            fish.turn_facing_timer = front_timer.max(0.0001);
+            assert_eq!(fish.turn_pose(), Some(TurnPose::Front), "{sp:?}: 背面向きの時間経過後は正面向きのはず");
+            let front = fish.display_sprite();
+            assert_ne!(
+                (front.width, front.height, &front.pixels),
+                (normal.width, normal.height, &normal.pixels),
+                "{sp:?}: 正面向き中は通常プロファイルと異なるはず"
+            );
+            assert_ne!(
+                (front.width, front.height, &front.pixels),
+                (back.width, back.height, &back.pixels),
+                "{sp:?}: 正面向きと背面向きは異なるスプライトのはず"
+            );
+
+            // タイマーが切れたら通常プロファイルに戻るはず。
+            fish.turn_facing_timer = 0.0;
+            assert_eq!(fish.turn_pose(), None, "{sp:?}: タイマーが0なら通常表示のはず");
+            let reverted = fish.display_sprite();
+            assert_eq!(
+                (reverted.width, reverted.height, &reverted.pixels),
+                (normal.width, normal.height, &normal.pixels),
+                "{sp:?}: タイマーが切れたら通常プロファイルへ戻るはず"
+            );
+        }
+    }
 
     // 通常種(COMMON)の成魚は、BIG_ADULT_GROWTH_STAGE以降で専用の高解像度
     // パターンに切り替わり、基準(growth_stage=0)より一回り大きい描画キャンバスに
