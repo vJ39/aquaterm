@@ -316,11 +316,11 @@ pub const INK_HOLD_FRACTION: f64 = 0.35;
 // 色・半径定数を使う)。着水した瞬間に水底から一気に広がる。
 // 着水直後は勢いよくではなく、もわっと広がってしばらく尾を引くように長めにした
 // (墨のような一瞬の勢いではなく、じわじわ長く漂う拡散にしてほしいという指摘への対応)。
+// 着水地点から水槽全体を覆うまで同心円状に広がる紫の波(main.rs側の描画で
+// 対角線の長さを基準に半径を計算する)にかける時間。この間は着水地点ほど濃く、
+// 波の先端はグラデーションでぼかす。広がりきった瞬間に効果(濃度加算)が発動する。
 pub const PURIFY_BLOOM_LIFETIME: f64 = 14.0;
-pub const PURIFY_BLOOM_GROWTH_TIME: f64 = 6.0; // ゆっくり広がる
-pub const PURIFY_BLOOM_MAX_RADIUS: f64 = 48.0; // 墨(42.0)よりさらに広め
-pub const PURIFY_BLOOM_MIX: f64 = 0.9;
-pub const PURIFY_BLOOM_HOLD_FRACTION: f64 = 0.45; // 広がりきった後も長く色を保つ
+pub const PURIFY_BLOOM_GROWTH_TIME: f64 = 6.0;
 // 墨が広がっている間、その範囲にいる捕食者(ピラニア等)は獲物を検知できなくなる
 // (「視界が悪くなる」演出。捕食者側のchase_target判定を一時的に無効化する)。
 // 墨を吐いたら高確率で逃げ切れるという結果まで保証してほしいという要望を
@@ -2420,7 +2420,9 @@ impl Simulation {
                 self.purifier_concentration += 1.0;
             }
         }
-        self.purify_blooms.retain(|b| b.life > 0.0);
+        // 発動済み(activated)のブルームは、以降は同心円状の広がり演出(main.rs側)にも
+        // 均一な紫染め(purifier_concentration)にも二重に寄与しないよう、その場で取り除く。
+        self.purify_blooms.retain(|b| !b.activated && b.life > 0.0);
     }
 
     // 遊泳: ランダムウォーク+慣性+壁反射+群れ+餌吸引(空腹度・病気で速度が変化)。

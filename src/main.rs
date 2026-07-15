@@ -605,6 +605,12 @@ fn render_tank(
     // 1.0=昼..0.0=夜)を適用し、夜は暗く落ち着いた紺色に寄せる(水槽を暗くしたり
     // 明るくしたりしたいという要望への対応。境界はcolor::day_brightness側で
     // なめらかに補間済みなので、ここではその係数をそのまま使うだけでよい)。
+    // 浄化剤の紫染めは、着水地点から水槽全体を覆うまで同心円状に広がっていく波として
+    // 見せる(着火のような一瞬の演出はやめて、拡散そのものが効果の反映過程に見えるように
+    // してほしいという指摘への対応)。対角線の長さを基準に、拡散にかかる時間
+    // (PURIFY_BLOOM_GROWTH_TIME)で波の半径が0→対角線まで育つようにする。
+    let diagonal = ((w * w + h * h) as f64).sqrt();
+    let wave_edge = (diagonal * 0.08).max(3.0); // 波の先端のグラデーション幅
     for y in 0..h {
         if y >= sand_top {
             for x in 0..w {
@@ -620,15 +626,28 @@ fn render_tank(
             };
             // 水質パラメータの可視化: 汚れているほど水が濁った緑〜茶系の色に寄る。
             let pollution_frac = sim.pollution / sim::POLLUTION_MAX;
-            // 浄化剤が効いている間は紫色に染める。濃度が薄まるにつれて紫も薄れていく。
-            let c = apply_day_night(
-                apply_purifier_tint(
-                    apply_murkiness(water_gradient(frac), pollution_frac),
-                    sim.purifier_concentration,
-                ),
-                day,
-            );
+            let base_water = apply_murkiness(water_gradient(frac), pollution_frac);
             for x in 0..w {
+                // まだ拡散中(未発動)のブルームがあれば、着水地点からの同心円状の
+                // 波として、定着済みの濃度(purifier_concentration)に上乗せする。
+                let mut wave = 0.0f64;
+                for b in &sim.purify_blooms {
+                    let age = b.max_life - b.life;
+                    let radius = (age / sim::PURIFY_BLOOM_GROWTH_TIME).clamp(0.0, 1.0) * diagonal;
+                    let dist = ((x as f64 - b.x).powi(2) + (y as f64 - b.y).powi(2)).sqrt();
+                    let intensity = if dist <= radius - wave_edge {
+                        1.0
+                    } else if dist >= radius {
+                        0.0
+                    } else {
+                        (radius - dist) / wave_edge
+                    };
+                    wave = wave.max(intensity);
+                }
+                let c = apply_day_night(
+                    apply_purifier_tint(base_water, sim.purifier_concentration + wave),
+                    day,
+                );
                 fb.set_pixel(x, y, c);
             }
         }
@@ -753,25 +772,6 @@ fn render_tank(
         );
     }
 
-    // 浄化ブルーム(浄化剤の着水演出): 墨と同じ「同心円状に勢いよく広がって薄れて消える」
-    // 構造を再利用し、明るく清潔感のある水色(墨の黒・血の赤とは対照的な色)で描く。
-    let bloom_tint = Color::new(140, 235, 230);
-    for b in &sim.purify_blooms {
-        draw_spreading_stain(
-            fb,
-            b.x,
-            b.y,
-            b.life,
-            b.max_life,
-            sim::PURIFY_BLOOM_GROWTH_TIME,
-            sim::PURIFY_BLOOM_MAX_RADIUS,
-            sim::PURIFY_BLOOM_HOLD_FRACTION,
-            sim::PURIFY_BLOOM_MIX,
-            bloom_tint,
-            w,
-            h,
-        );
-    }
 
     // 水流の筋(可視化演出): 淡い青白の短い横線を、背景に薄く溶かして描く(はっきりした
     // 実線ではなく、水が流れる揺らめきとして読めるようにする)。生成直後と消滅間際で薄く、
