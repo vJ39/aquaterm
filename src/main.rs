@@ -82,7 +82,10 @@ pub(crate) struct Ctl {
     cursor_x: f64,        // 照準カーソルの位置(論理ピクセル)。餌/薬の投下X座標に使う
     cursor_y: f64,
     pub(crate) overlay_on: bool, // ステータスオーバーレイ(腹ペコ/病気フラグ・生命ゲージ)表示ON/OFF
-    pub(crate) sfx_on: bool, // 効果音(SE)のON/OFF。気泡音(Bubble)は対象外(bubble_sfx_onで別管理)
+    // 効果音(SE)全体のON/OFF。個別トグル(bubble_sfx_on・predation_sfx_on・drop_sfx_on・
+    // health_sfx_on)を持つ種類のSEはそちら側で管理し、それ以外(ガラス叩き・トントン・
+    // UIクリック・スター取得等)はこのsfx_onで管理する(sfx_enabled_for参照)。
+    pub(crate) sfx_on: bool,
     pub(crate) auto_on: bool, // 自動モード(自動餌やり・自動投薬・自動ガラス叩き)のON/OFF。既定OFF
     settings_on: bool,     // 設定画面(,キー)を開いているか
     settings_selected: usize, // 設定画面での選択項目インデックス(0..SETTINGS_ITEM_COUNT)
@@ -91,11 +94,17 @@ pub(crate) struct Ctl {
     // バブル音と他のSEのトグルを分離してほしいという要望への対応。気泡が上る音だけ
     // 他の効果音(sfx_on)とは独立にON/OFFできる。既定ON(従来の常時鳴る挙動を維持)。
     pub(crate) bubble_sfx_on: bool,
+    // 気泡音に続く個別トグルの拡張(捕食系・投下系・状態通知系)。他のSE(sfx_on)とは
+    // 独立にON/OFFできる。既定ON(従来の常時鳴る挙動を維持)。まとめ方の理由は
+    // sfx_enabled_for のコメント参照。
+    pub(crate) predation_sfx_on: bool, // 捕食(噛みつき)・墨を吐く音
+    pub(crate) drop_sfx_on: bool,      // 餌・薬・浄化剤を投下した音
+    pub(crate) health_sfx_on: bool,    // 病気発症・回復・空腹発症の通知音
 }
 
 // 設定画面で切り替えられる項目数(効果音・オーバーレイ・自動モード・昼夜連動・自動魚補充・
-// 気泡音・通常5種それぞれの生成トグル)
-const SETTINGS_ITEM_COUNT: usize = 13;
+// 気泡音・捕食音・投下音・状態通知音・通常5種それぞれの生成トグル・餌の量・カニ)
+const SETTINGS_ITEM_COUNT: usize = 16;
 
 fn main() {
     if let Err(e) = run() {
@@ -149,6 +158,9 @@ fn run() -> std::io::Result<()> {
         day_night_on: true, // 既定はON(実際の時刻に応じて自動で明るさが変わる)
         auto_replenish_on: false, // 既定OFF(勝手に増えるのを望まない場合もあるため)
         bubble_sfx_on: true, // 既定ON(従来の常時鳴る挙動を維持)
+        predation_sfx_on: true, // 既定ON(従来の常時鳴る挙動を維持)
+        drop_sfx_on: true,      // 既定ON(従来の常時鳴る挙動を維持)
+        health_sfx_on: true,    // 既定ON(従来の常時鳴る挙動を維持)
     };
 
     let saved = persist::load();
@@ -249,14 +261,9 @@ fn run() -> std::io::Result<()> {
             }
 
             // このtickで発生した効果音イベントを再生する(OFF中は消費だけして鳴らさない)。
-            // 気泡音(Bubble)だけはbubble_sfx_onで独立にON/OFFできる(他のSEはsfx_on)。
+            // 種類ごとの個別トグルの扱いはsfx_enabled_for参照。
             for ev in sim.sound_events.drain(..) {
-                let enabled = if ev == sim::SfxEvent::Bubble {
-                    ctl.bubble_sfx_on
-                } else {
-                    ctl.sfx_on
-                };
-                if enabled {
+                if sfx_enabled_for(&ctl, ev) {
                     sound.play(ev);
                 }
             }
@@ -298,6 +305,34 @@ fn run() -> std::io::Result<()> {
     let _ = persist::save(&sim, &ctl);
     execute_teardown(&mut out)?;
     Ok(())
+}
+
+// SEイベントの種類ごとに、対応する個別トグルがONかどうかを判定する(OFFなら
+// main.rs側でsound.play()を呼ばず消費だけする)。個別トグルを持たない種類は
+// 全体スイッチ(sfx_on)に従う。
+//
+// グルーピングの理由: 種類ごとに完全に1つずつトグルを設けると設定画面の項目数が
+// 増えすぎるため、演出上の役割が近いものをまとめている。
+// - predation_sfx_on: 捕食(噛みつき)と、その脅威に対する反応である墨は、いずれも
+//   「捕食者が引き起こす音」として一括りにできる
+// - drop_sfx_on: 餌・薬・浄化剤は、いずれも「アイテムを水槽に投下した音」という
+//   共通の役割を持つ
+// - health_sfx_on: 病気発症・回復・空腹発症は、いずれも「個体の健康状態が変化した
+//   ことを知らせる通知音」という共通の役割を持つ
+// 一方、ガラス叩き・トントン・UIクリック・スター取得は、それぞれ役割が異なる上に
+// 頻度も低く個別に消したい需要が薄いと判断し、全体スイッチ(sfx_on)のままにしている
+// (産卵・孵化には現時点で専用のSfxEventが無いため、そのぶんのトグルは追加していない)。
+fn sfx_enabled_for(ctl: &Ctl, ev: sim::SfxEvent) -> bool {
+    match ev {
+        sim::SfxEvent::Bubble => ctl.bubble_sfx_on,
+        sim::SfxEvent::Predation | sim::SfxEvent::Ink => ctl.predation_sfx_on,
+        sim::SfxEvent::Feed | sim::SfxEvent::Medicate | sim::SfxEvent::Purify => ctl.drop_sfx_on,
+        sim::SfxEvent::SickOnset | sim::SfxEvent::Cured | sim::SfxEvent::HungryOnset => ctl.health_sfx_on,
+        sim::SfxEvent::GlassKnock
+        | sim::SfxEvent::Tap
+        | sim::SfxEvent::UiClick
+        | sim::SfxEvent::StarPickup => ctl.sfx_on,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,15 +414,27 @@ fn handle_key(
                         ctl.bubble_sfx_on = !ctl.bubble_sfx_on;
                         ctl.bubble_sfx_on
                     }
-                    idx @ 6..=10 => {
-                        sim.toggle_common_species(idx - 6);
-                        sim.species_toggle[idx - 6]
+                    6 => {
+                        ctl.predation_sfx_on = !ctl.predation_sfx_on;
+                        ctl.predation_sfx_on
                     }
-                    11 => {
+                    7 => {
+                        ctl.drop_sfx_on = !ctl.drop_sfx_on;
+                        ctl.drop_sfx_on
+                    }
+                    8 => {
+                        ctl.health_sfx_on = !ctl.health_sfx_on;
+                        ctl.health_sfx_on
+                    }
+                    idx @ 9..=13 => {
+                        sim.toggle_common_species(idx - 9);
+                        sim.species_toggle[idx - 9]
+                    }
+                    14 => {
                         sim.cycle_feed_amount();
                         true
                     }
-                    12 => {
+                    15 => {
                         sim.toggle_crabs(fb.pix_width());
                         sim.crab_toggle
                     }
@@ -502,9 +549,13 @@ fn handle_key(
         }
         KeyCode::Char('s') => {
             ctl.sfx_on = !ctl.sfx_on;
-            // `s`は全体ミュートのクイックキーとして、バブル音トグルも連動させる
-            // (個別に分けたい場合は設定画面(`,`)で気泡音だけを後から切り替えられる)。
+            // `s`は全体ミュートのクイックキーとして、個別トグル(気泡音・捕食音・
+            // 投下音・状態通知音)もまとめて連動させる(個別に分けたい場合は設定画面
+            // (`,`)で種類ごとに後から切り替えられる)。
             ctl.bubble_sfx_on = ctl.sfx_on;
+            ctl.predation_sfx_on = ctl.sfx_on;
+            ctl.drop_sfx_on = ctl.sfx_on;
+            ctl.health_sfx_on = ctl.sfx_on;
             if ctl.sfx_on {
                 sim.sound_events.push(sim::SfxEvent::UiClick);
             }
@@ -1708,6 +1759,9 @@ fn draw_settings_panel(
         ("昼夜連動".to_string(), on_off(ctl.day_night_on)),
         ("自動魚補充".to_string(), on_off(ctl.auto_replenish_on)),
         ("気泡音".to_string(), on_off(ctl.bubble_sfx_on)),
+        ("捕食音".to_string(), on_off(ctl.predation_sfx_on)),
+        ("投下音".to_string(), on_off(ctl.drop_sfx_on)),
+        ("状態通知音".to_string(), on_off(ctl.health_sfx_on)),
     ];
     for (i, name) in species_names.iter().enumerate() {
         items.push((format!("生成:{name}"), on_off(sim.species_toggle[i])));
@@ -1974,5 +2028,105 @@ mod tests {
         assert_eq!(dex_grid_columns(10), 1);
         let rows = dex_total_rows(10);
         assert!(rows > 0);
+    }
+
+    // SEの種類ごとの個別トグル(sfx_enabled_for)のテスト用に、全トグルON(既定値)の
+    // Ctlを作る。テストごとに検証したいフィールドだけ書き換えて使う。
+    fn test_ctl_all_sfx_on() -> Ctl {
+        Ctl {
+            paused: false,
+            speed_idx: SPEED_DEFAULT,
+            awaiting_reset: false,
+            cursor_x: 0.0,
+            cursor_y: 0.0,
+            overlay_on: true,
+            sfx_on: true,
+            auto_on: false,
+            settings_on: false,
+            settings_selected: 0,
+            day_night_on: true,
+            auto_replenish_on: false,
+            bubble_sfx_on: true,
+            predation_sfx_on: true,
+            drop_sfx_on: true,
+            health_sfx_on: true,
+        }
+    }
+
+    // 個別トグルOFFの時、そのグループに属するSEイベントは発火しない(sfx_onが
+    // ONでも鳴らない)ことの回帰テスト。
+    #[test]
+    fn predation_sfx_off_mutes_predation_and_ink_regardless_of_master_sfx_on() {
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.predation_sfx_on = false;
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::Predation));
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::Ink));
+        // 他のグループには影響しない
+        assert!(sfx_enabled_for(&ctl, sim::SfxEvent::Feed));
+        assert!(sfx_enabled_for(&ctl, sim::SfxEvent::SickOnset));
+        assert!(sfx_enabled_for(&ctl, sim::SfxEvent::Bubble));
+    }
+
+    #[test]
+    fn drop_sfx_off_mutes_feed_medicate_and_purify_regardless_of_master_sfx_on() {
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.drop_sfx_on = false;
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::Feed));
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::Medicate));
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::Purify));
+        // 他のグループには影響しない
+        assert!(sfx_enabled_for(&ctl, sim::SfxEvent::Predation));
+    }
+
+    #[test]
+    fn health_sfx_off_mutes_sick_cured_and_hungry_regardless_of_master_sfx_on() {
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.health_sfx_on = false;
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::SickOnset));
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::Cured));
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::HungryOnset));
+        // 他のグループには影響しない
+        assert!(sfx_enabled_for(&ctl, sim::SfxEvent::Purify));
+    }
+
+    // 個別トグルを持たない種類(ガラス叩き・トントン・UIクリック・スター取得)は、
+    // 従来通り全体スイッチ(sfx_on)に従うことの回帰テスト。
+    #[test]
+    fn events_without_a_dedicated_toggle_follow_the_master_sfx_on() {
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.sfx_on = false;
+        // 個別トグル自体はONのままでも、専用トグルの無い種類はsfx_on側で消える
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::GlassKnock));
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::Tap));
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::UiClick));
+        assert!(!sfx_enabled_for(&ctl, sim::SfxEvent::StarPickup));
+        // 個別トグルを持つ種類はsfx_onの影響を受けない(bubble_sfx_onの既存挙動と同じ)
+        assert!(sfx_enabled_for(&ctl, sim::SfxEvent::Bubble));
+        assert!(sfx_enabled_for(&ctl, sim::SfxEvent::Predation));
+        assert!(sfx_enabled_for(&ctl, sim::SfxEvent::Feed));
+        assert!(sfx_enabled_for(&ctl, sim::SfxEvent::SickOnset));
+    }
+
+    // 全トグルONなら、全種類のSEが発火することの回帰テスト。
+    #[test]
+    fn all_sfx_toggles_on_enables_every_event_kind() {
+        let ctl = test_ctl_all_sfx_on();
+        for ev in [
+            sim::SfxEvent::Bubble,
+            sim::SfxEvent::Feed,
+            sim::SfxEvent::Medicate,
+            sim::SfxEvent::Purify,
+            sim::SfxEvent::SickOnset,
+            sim::SfxEvent::Cured,
+            sim::SfxEvent::HungryOnset,
+            sim::SfxEvent::GlassKnock,
+            sim::SfxEvent::Predation,
+            sim::SfxEvent::Ink,
+            sim::SfxEvent::Tap,
+            sim::SfxEvent::UiClick,
+            sim::SfxEvent::StarPickup,
+        ] {
+            assert!(sfx_enabled_for(&ctl, ev), "{ev:?}が鳴らないのは既定値からのはず");
+        }
     }
 }
