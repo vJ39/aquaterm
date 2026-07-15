@@ -654,9 +654,10 @@ fn render_tank(
         draw_sprite(fb, &fish::rock_sprite(), r.x, r.y, true, w, h, |_, _, base| base);
     }
 
-    // タコつぼ(装飾+タコの巣)
+    // タコつぼ(装飾+タコの巣)。タコ自体をデフォルトで大きくした(OCTOPUS_BASE_SCALE_BONUS)
+    // のに合わせて、タコつぼの見た目も揃えて大きく描く。
     for d in &sim.dens {
-        draw_sprite(fb, &fish::den_sprite(), d.x, d.y, true, w, h, |_, _, base| base);
+        draw_sprite_scaled(fb, &fish::den_sprite(), d.x, d.y, DEN_SCALE, w, h);
     }
 
     // カメオ生物(ウミガメ・クラゲ・小魚の群れ)。完全観賞用で、育成ロジック・
@@ -1162,6 +1163,33 @@ fn draw_sprite(
         let py = top + dy as isize;
         if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
             fb.set_pixel(px as usize, py as usize, color_fn(dx, dy, base));
+        }
+    }
+}
+
+// タコつぼをデフォルトで少し大きく描くための拡大表示(タコ自体の拡大に合わせて
+// 見た目を揃える)。draw_sprite(等倍・反転のみ対応)とは別に、最近傍サンプリングで
+// scale倍に拡大して描く(魚の拡大描画と同じ考え方)。
+const DEN_SCALE: f64 = 1.4;
+fn draw_sprite_scaled(fb: &mut FrameBuffer, sprite: &fish::Sprite, cx: f64, cy: f64, scale: f64, w: usize, h: usize) {
+    let out_w = ((sprite.width as f64) * scale).round().max(1.0) as usize;
+    let out_h = ((sprite.height as f64) * scale).round().max(1.0) as usize;
+    let grid = sprite_dense(sprite);
+    let left = cx.round() as isize - (out_w as isize) / 2;
+    let top = cy.round() as isize - (out_h as isize) / 2;
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let sx = ((ox as f64) / scale).floor() as usize;
+            let sy = ((oy as f64) / scale).floor() as usize;
+            let sx = sx.min(sprite.width.saturating_sub(1));
+            let sy = sy.min(sprite.height.saturating_sub(1));
+            if let Some(base) = grid[sy * sprite.width + sx] {
+                let px = left + ox as isize;
+                let py = top + oy as isize;
+                if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
+                    fb.set_pixel(px as usize, py as usize, base);
+                }
+            }
         }
     }
 }

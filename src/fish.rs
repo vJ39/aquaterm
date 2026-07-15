@@ -5,7 +5,8 @@ use crate::color::Color;
 use crate::sim::{
     AGILITY_FRY_SIZE_STEPS, AGILITY_MULT_MAX, AGILITY_MULT_MIN, AGILITY_STEP, FULL_THRESHOLD,
     GENERAL_GROWTH_SCALE_STEP, GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE, HUNGRY_THRESHOLD, MAX_HUNGER,
-    PIRANHA_KILL_GROWTH_SCALE_STEP, PIRANHA_MAX_KILL_STAGE, SIZE_SPEED_PENALTY_STEP,
+    OCTOPUS_BASE_SCALE_BONUS, PIRANHA_KILL_GROWTH_SCALE_STEP, PIRANHA_MAX_KILL_STAGE,
+    SIZE_SPEED_PENALTY_STEP,
 };
 use serde::{Deserialize, Serialize};
 
@@ -332,7 +333,14 @@ impl Fish {
         } else {
             0.0
         };
-        1.0 + general + kill
+        // タコはデフォルトで他種より大きく見せたいという要望への対応。成長段階に
+        // よるスケールとは別枠の、種固有のベース倍率として加算する。
+        let species_bonus = if matches!(self.species, Species::Octopus) {
+            OCTOPUS_BASE_SCALE_BONUS
+        } else {
+            0.0
+        };
+        1.0 + species_bonus + general + kill
     }
 
     // 口(頭部前端)のワールド座標。捕食判定を胴体でなく口にすべきという指摘への対応:

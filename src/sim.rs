@@ -54,6 +54,8 @@ pub const SIZE_GROW_TIME: f64 = 90.0; // 満腹維持がこの時間続くごと
 pub const GENERAL_GROWTH_SCALE_STEP: f64 = 0.15; // 1段階あたりの見た目拡大率
 // 成長段階が上がるほど、泳ぐ速度がやや遅くなる(必須ではないが体感の変化として付与)
 pub const SIZE_SPEED_PENALTY_STEP: f64 = 0.05;
+// タコはデフォルトで他種より大きく見せる(成長段階によるスケールとは別枠のベース倍率)。
+pub const OCTOPUS_BASE_SCALE_BONUS: f64 = 0.5;
 
 // --- サイズと機敏さの連動(新規): 小さい魚ほど通常時もキビキビ ---
 // 「大きくなるほど遅くなる」(SIZE_SPEED_PENALTY_STEP)と対になる形で、稚魚(Fry)や
@@ -149,6 +151,10 @@ pub const POLLUTION_SICK_ELIGIBLE_FRAC: f64 = 0.5;
 // 待たず、水質が上記の閾値以上悪化している間、毎秒この確率で直接力尽きる
 // (稚魚は成魚より水質悪化に弱く、すぐ死んでしまうという仕様のため)。
 pub const POLLUTION_FRY_DEATH_CHANCE_PER_SEC: f64 = 0.1;
+// 水質が悪化している間、捕食者(ピラニア・タコ)以外の通常種は食欲そのものを
+// 失う(空腹度の減りが速まり、update_movement側では餌を探して寄っていく
+// 誘引ベクトルも止める)。水質最悪でHUNGER_DECAYがこの倍になる。
+pub const POLLUTION_HUNGER_DECAY_MAX_MULT: f64 = 3.0;
 
 // --- 死亡演出パラメータ ---
 // 死んだ魚は、体内のガスによる浮力(時間とともに減衰する)と重力・水の抵抗を
@@ -2047,6 +2053,10 @@ impl Simulation {
         let margin: f64 = 4.0;
         let top_margin: f64 = 3.0;
         let wall_push = 70.0;
+        // 水質が悪化していると、捕食者でない通常種は食欲そのものを失い、餌を
+        // 探して寄っていかなくなる(空腹度自体は別途update_biology側でより速く
+        // 減っていくため、餌を放置すれば結果的に餓死しやすくなる)。
+        let food_appetite_lost = self.pollution >= POLLUTION_MAX * POLLUTION_SICK_ELIGIBLE_FRAC;
 
         for i in 0..self.fish.len() {
             if self.fish[i].dead {
@@ -2167,7 +2177,10 @@ impl Simulation {
             // 腹ぺこなら最寄りの餌を先に探しておく。餌を追っている間は通常の遊泳
             // (ランダムウォーク・群れ)を大きく弱め、吸引ベクトルの方向へはっきり
             // 優先して進ませる(近くに餌があれば一直線に向かうくらいの強さにする)。
-            let nearest_food = if hunger < HUNGRY_THRESHOLD && !self.food.is_empty() {
+            let nearest_food = if hunger < HUNGRY_THRESHOLD
+                && !self.food.is_empty()
+                && !(food_appetite_lost && !sp.is_predator())
+            {
                 let mut best = f64::INFINITY;
                 let mut best_pos = None;
                 for fd in &self.food {
@@ -3009,6 +3022,12 @@ impl Simulation {
         // 条件(腹ぺこ継続・過密)を満たさない限り水質が何であっても発症しないため、
         // 満腹を保っていれば水質が最悪でも病気にならないという抜け穴があった。
         let heavily_polluted = self.pollution >= POLLUTION_MAX * POLLUTION_SICK_ELIGIBLE_FRAC;
+        // 水質が悪いほど、捕食者でない通常種の空腹度の減りを速める(食欲不振の表現。
+        // 水質最悪でPOLLUTION_HUNGER_DECAY_MAX_MULT倍)。加えてupdate_movement側で
+        // 餌を探して寄っていく誘引ベクトル自体も止めるため、餌を放置していると
+        // 結果的に餓死しやすくなる。
+        let pollution_hunger_decay_mult =
+            1.0 + (self.pollution / POLLUTION_MAX) * (POLLUTION_HUNGER_DECAY_MAX_MULT - 1.0);
         let mut messages: Vec<String> = Vec::new();
         let mut deaths: Vec<String> = Vec::new();
         // 産卵イベント: (親x, 親y, 種)。借用の都合で後からまとめて卵を生成する。
@@ -3025,7 +3044,13 @@ impl Simulation {
             f.age += dt;
 
             // 空腹度の減少
-            f.hunger = (f.hunger - HUNGER_DECAY * f.hunger_decay_mult * dt).max(0.0);
+            let hunger_pollution_mult = if f.species.is_predator() {
+                1.0
+            } else {
+                pollution_hunger_decay_mult
+            };
+            f.hunger =
+                (f.hunger - HUNGER_DECAY * f.hunger_decay_mult * hunger_pollution_mult * dt).max(0.0);
 
             // 「食欲がなくても無限に追いかけまわす」バグの修正: 旺盛な食欲の
             // クォータ(meals_since_full)が進行中(1以上KILLS_TO_FULL未満)の間だけ
@@ -4857,6 +4882,75 @@ mod tests {
             }
         }
         assert!(!sim.fish[0].dead, "成魚は水質による直接死亡の対象外のはず");
+    }
+
+    #[test]
+    fn heavily_polluted_water_speeds_up_hunger_decay_for_common_species_but_not_piranha() {
+        // 水質が悪化していると、捕食者でない通常種は空腹度の減りが速まる(食欲不振)。
+        // ピラニアはこの影響を受けないはず。
+        let (w, h) = (80, 40);
+        let make_sim = |pollution: f64, species: Species| {
+            let mut sim = Simulation::new(Rng::new(9010));
+            sim.pollution = pollution;
+            sim.fish.push(Fish::new(species, Stage::Adult, 40.0, 20.0));
+            sim
+        };
+
+        let mut clean_common = make_sim(0.0, Species::Neon);
+        let mut dirty_common = make_sim(POLLUTION_MAX, Species::Neon);
+        clean_common.update(1.0, w, h);
+        dirty_common.update(1.0, w, h);
+        assert!(
+            dirty_common.fish[0].hunger < clean_common.fish[0].hunger,
+            "水質最悪の通常種は空腹度がより早く減るはず(clean={} dirty={})",
+            clean_common.fish[0].hunger,
+            dirty_common.fish[0].hunger
+        );
+
+        let mut clean_piranha = make_sim(0.0, Species::Piranha);
+        let mut dirty_piranha = make_sim(POLLUTION_MAX, Species::Piranha);
+        clean_piranha.update(1.0, w, h);
+        dirty_piranha.update(1.0, w, h);
+        assert_eq!(
+            clean_piranha.fish[0].hunger, dirty_piranha.fish[0].hunger,
+            "ピラニアは水質による空腹度減少の影響を受けないはず"
+        );
+    }
+
+    #[test]
+    fn heavily_polluted_water_stops_common_species_from_seeking_food() {
+        // 水質が悪化していると、捕食者でない通常種は腹ぺこでも餌への誘引ベクトルが
+        // つかない(食欲そのものを失う)はず。通常の遊泳(ランダムウォーク)自体は
+        // 常に多少の速度を生むため、同じ乱数シード・同じ初期状態で「餌がある場合」
+        // と「無い場合」の結果が一致することを比較して検証する。
+        let (w, h) = (200, 100);
+        let make_sim = |with_food: bool| {
+            let mut sim = Simulation::new(Rng::new(9011));
+            sim.pollution = POLLUTION_MAX;
+            let mut f = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
+            f.hunger = 0.0; // 腹ぺこ
+            sim.fish.push(f);
+            if with_food {
+                sim.food.push(Food {
+                    x: 100.0,
+                    y: 20.0,
+                    vy: 0.0,
+                    life: FOOD_LIFETIME,
+                    landed: false,
+                    sway_phase: 0.0,
+                });
+            }
+            sim
+        };
+        let mut with_food = make_sim(true);
+        let mut without_food = make_sim(false);
+        with_food.update_movement(0.05, w as f64, h as f64 - sand_height(h) as f64);
+        without_food.update_movement(0.05, w as f64, h as f64 - sand_height(h) as f64);
+
+        assert_eq!(
+            with_food.fish[0].vx, without_food.fish[0].vx,
+            "水質最悪では餌の有無で速度が変わらないはず(反応していない)"
+        );
     }
 
     #[test]
@@ -8738,5 +8832,25 @@ mod tests {
         assert_eq!(sim.fish_count(), 1, "ピラニア自身は残るはず(食べる対象が居ない)");
         assert_eq!(sim.shrimp.len(), 1, "エビは捕食されないはず");
         assert_eq!(sim.seahorses.len(), 1, "タツノオトシゴは捕食されないはず");
+    }
+
+    #[test]
+    fn octopus_has_a_larger_default_render_scale_than_other_species() {
+        // タコはデフォルトで他種より大きく見せる要望への対応。成長段階0(初期状態)
+        // でも、同じ条件の他種よりrender_scale()が大きいはず。
+        let octopus = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        let neon = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
+        assert_eq!(octopus.growth_stage, neon.growth_stage, "テスト前提: 成長段階は揃っていること");
+        assert!(
+            octopus.render_scale() > neon.render_scale(),
+            "タコのデフォルトサイズは他種より大きいはず(octopus={} neon={})",
+            octopus.render_scale(),
+            neon.render_scale()
+        );
+        assert_eq!(
+            octopus.render_scale(),
+            1.0 + OCTOPUS_BASE_SCALE_BONUS,
+            "タコのベース倍率はOCTOPUS_BASE_SCALE_BONUS分だけ上乗せされるはず"
+        );
     }
 }
