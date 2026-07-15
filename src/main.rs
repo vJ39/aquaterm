@@ -5,6 +5,7 @@
 //        p=一時停止 / [ ]=速度 / R=リセット / v=ステータスオーバーレイ表示切替 /
 //        s=効果音ON/OFF / a=自動モード / A=自動魚補充 / +,-=増減 /
 //        S=ピラニア確定追加 / O=タコ確定追加 / D=タコつぼ再配置 / P=藻・水草再配置 / ,=設定 / ?=ヘルプ / q=終了
+//        B=クジラを即座に大爆発させる(デバッグ)
 
 mod color;
 mod framebuffer;
@@ -15,9 +16,9 @@ mod sim;
 mod sound;
 
 use color::{
-    apply_day_night, apply_murkiness, apply_purifier_tint, day_brightness, lerp, scale, vitality_color,
-    water_gradient, Color, CURSOR, AFFINITY_FLAG, CRITICAL_FLAG, DEAD_FLAG, ELDERLY_FLAG, GAUGE_EMPTY, HUNGRY_FLAG,
-    INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG, SICK_TINT, WOUNDED_FLAG,
+    apply_day_night, apply_murkiness, apply_purifier_tint, apply_whale_explosion_flash, day_brightness, lerp,
+    scale, vitality_color, water_gradient, Color, CURSOR, AFFINITY_FLAG, CRITICAL_FLAG, DEAD_FLAG, ELDERLY_FLAG,
+    GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG, SICK_TINT, WOUNDED_FLAG,
 };
 use chrono::{Local, Timelike};
 use crossterm::{
@@ -553,6 +554,8 @@ fn handle_key(
         KeyCode::Char('Z') => sim.debug_spawn_star(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
         // デバッグ用: 生きている個体からランダムに1匹選んで寿命(老衰死)の残りを10秒にする
         KeyCode::Char('L') => sim.debug_age_random_fish_near_death(),
+        // デバッグ用: 存在するクジラを、WHALE_EXPLOSION_DELAY(60秒)を待たずに即座に大爆発させる
+        KeyCode::Char('B') => sim.debug_explode_whale(),
         KeyCode::Char(',') => {
             ctl.settings_on = true;
             ctl.settings_selected = 0;
@@ -762,6 +765,27 @@ fn render_tank(
         );
     }
 
+    // クジラ大爆発(ネタ枠)の巨大な血の滲み: 通常の血の滲み(blood_stains)と同じ
+    // 「同心円状に広がってフェードアウトする」構造を再利用しつつ、通常よりずっと
+    // 巨大・一段濃い赤にした専用バリエーション(sim::WHALE_EXPLOSION_STAIN_*を使う)。
+    let whale_gore_stain_tint = Color::new(90, 0, 0);
+    for s in &sim.whale_gore_stains {
+        draw_spreading_stain(
+            fb,
+            s.x,
+            s.y,
+            s.life,
+            s.max_life,
+            sim::WHALE_EXPLOSION_STAIN_GROWTH_TIME,
+            sim::WHALE_EXPLOSION_STAIN_MAX_RADIUS,
+            sim::WHALE_EXPLOSION_STAIN_HOLD_FRACTION,
+            sim::WHALE_EXPLOSION_STAIN_MIX,
+            whale_gore_stain_tint,
+            w,
+            h,
+        );
+    }
+
     // 墨(タコが吐く): 血の滲みと同じ「同心円状に広がってフェードアウトする」構造を
     // 再利用しつつ、血より広め・勢いよく(速く)拡散する黒っぽい色で描く。
     // 色が薄く、完全な黒に近づけてほしいという指摘を受けて、ほぼ純黒にした(旧(18,16,20))。
@@ -944,6 +968,21 @@ fn render_tank(
         // 踏まえ、拡大後のスプライト上端(top)基準で描く。
         if overlay_on {
             draw_status_overlay(fb, f, top, w, h, sim.elapsed);
+        }
+    }
+
+    // クジラ大爆発(ネタ枠): 一時的に画面全体を真っ赤に染めるオーバーレイ。魚・
+    // エフェクトを含めここまでに描いた最終合成の上から、intensity(発生直後が
+    // 最大でWHALE_EXPLOSION_FLASH_LIFETIMEにかけて減衰する)に応じて赤を混ぜる
+    // (pollutionによる水の濁り=apply_murkinessと同じ「色を混ぜるだけ」の考え方だが、
+    // こちらは水中だけでなく画面全ピクセルが対象)。
+    if sim.whale_explosion_flash > 0.0 {
+        let intensity = sim.whale_explosion_flash / sim::WHALE_EXPLOSION_FLASH_LIFETIME;
+        for y in 0..h {
+            for x in 0..w {
+                let base = fb.get_pixel(x, y);
+                fb.set_pixel(x, y, apply_whale_explosion_flash(base, intensity));
+            }
         }
     }
 }
@@ -1206,6 +1245,16 @@ fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usiz
         sim::EffectKind::Hatch => Color::new(200, 240, 160),
         // カニが亡骸を片付ける瞬間の分解演出。土に還るような、くすんだ灰褐色。
         sim::EffectKind::Decompose => Color::new(90, 78, 60),
+        // クジラ大爆発(ネタ枠)の肉片・血飛沫。通常の血飛沫(Blood)の3色より一段暗く
+        // 濃い赤にし、「超巨大かつ濃い赤」という演出意図をはっきり見せる。
+        sim::EffectKind::WhaleGore => {
+            let variant = ((e.x * 61.7 + e.y * 29.3).abs() as u64) % 3;
+            match variant {
+                0 => Color::new(120, 0, 0),  // Bloodの濃い暗赤(150,0,8)よりさらに暗く濃い
+                1 => Color::new(70, 0, 4),   // Bloodの赤黒(90,0,10)よりさらに暗い
+                _ => Color::new(160, 15, 15), // Bloodのピンク寄り(205,55,90)より濃く鈍い緋色
+            }
+        }
     };
 
     if e.kind == sim::EffectKind::Spawn || e.kind == sim::EffectKind::Mate {
@@ -1240,31 +1289,47 @@ fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usiz
         return;
     }
 
-    if e.kind == sim::EffectKind::Blood || e.kind == sim::EffectKind::Decompose {
+    if e.kind == sim::EffectKind::Blood
+        || e.kind == sim::EffectKind::Decompose
+        || e.kind == sim::EffectKind::WhaleGore
+    {
         // 内臓の破片・分解した破片らしい重量感: 単発の小さい点ではなく、若いうちは塊
         // (隣接ピクセルも塗って太らせる)として見せ、時間とともにゆっくり沈み
         // (drift)ながら小さく溶けるように消える。カニによる分解演出(Decompose)は
         // 血の滲みと同じ仕組みを流用しつつ、より大きく破片が飛び散り、フェード
-        // アウトも加えて「崩れて消えていく」印象を強める。
+        // アウトも加えて「崩れて消えていく」印象を強める。クジラ大爆発の肉片
+        // (WhaleGore)は、Bloodと同じ仕組みをさらに大幅に拡大した専用バリエーション
+        // (「超巨大」という演出意図に応え、塊自体・飛び散る範囲ともに一段大きくする)。
         let is_decompose = e.kind == sim::EffectKind::Decompose;
+        let is_whale_gore = e.kind == sim::EffectKind::WhaleGore;
         let drift_y = progress * 3.0; // ゆっくり沈んでいく
         let cy = e.y + drift_y;
         let fade = if is_decompose { (1.0 - progress).clamp(0.0, 1.0) } else { 1.0 };
         let c = scale(color, fade);
         put(fb, e.x, cy, c, w, h);
+        // 若いうち(寿命の前半)は十字方向にも塗って重たい塊に見せる。クジラの肉片は
+        // Blood/Decompose(±1px)よりさらに広い±2pxを塗って、一段大きな塊に見せる。
+        let cross_offset = if is_whale_gore { 2.0 } else { 1.0 };
         if progress < 0.5 {
-            // 若いうち(寿命の前半)は十字方向にも塗って重たい塊に見せる
-            put(fb, e.x - 1.0, cy, c, w, h);
-            put(fb, e.x + 1.0, cy, c, w, h);
-            put(fb, e.x, cy - 0.6, c, w, h);
-            put(fb, e.x, cy + 0.6, c, w, h);
+            put(fb, e.x - cross_offset, cy, c, w, h);
+            put(fb, e.x + cross_offset, cy, c, w, h);
+            put(fb, e.x, cy - cross_offset * 0.6, c, w, h);
+            put(fb, e.x, cy + cross_offset * 0.6, c, w, h);
         }
-        // ゆったり広がる飛び散り(Decomposeは血の滲みより一回り大きく広がる)
-        let spread_mult = if is_decompose { 1.4 } else { 0.7 };
+        // ゆったり広がる飛び散り(Decomposeは血の滲みより一回り大きく広がり、
+        // WhaleGoreはさらに大幅に広く飛び散る)
+        let spread_mult = if is_whale_gore {
+            3.0
+        } else if is_decompose {
+            1.4
+        } else {
+            0.7
+        };
         let radius = progress * sim::BLOOD_SPREAD_RADIUS * spread_mult;
-        const SCATTER_RING_POINTS: usize = 6;
-        for i in 0..SCATTER_RING_POINTS {
-            let theta = (i as f64) * std::f64::consts::PI * 2.0 / (SCATTER_RING_POINTS as f64);
+        // 飛び散る破片の数もWhaleGoreは通常より多くして、より賑やかに見せる。
+        let scatter_ring_points = if is_whale_gore { 10 } else { 6 };
+        for i in 0..scatter_ring_points {
+            let theta = (i as f64) * std::f64::consts::PI * 2.0 / (scatter_ring_points as f64);
             let px = e.x + radius * theta.cos();
             let py = cy + radius * theta.sin() * 0.6;
             put(fb, px, py, c, w, h);
@@ -1778,7 +1843,7 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
         "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / C 浄化剤 / D タコつぼ / P 水草",
         "          H 全員空腹に / G 全稚魚を成魚に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
-        "          J 水質トグル / X ランダム死亡 / Z スター投入 / L 寿命残り10秒(いずれもデバッグ)",
+        "          J 水質トグル / X ランダム死亡 / Z スター投入 / L 寿命残り10秒 / B クジラ即時大爆発(いずれもデバッグ)",
         "",
         "  注意: 浄化剤(C)は着水後すぐ水質が下がるが、薄まりきる(約10分)まで",
         "        通常種の食欲不振・全種の老化加速が続く。連投すると濃度が積み上がり、",

@@ -264,6 +264,12 @@ pub struct Fish {
     // 旧セーブでは0(ずれ無し・挙動不変)になる。
     #[serde(default)]
     pub growth_cap_variance: i8,
+    // --- クジラ専用(他種は使わない。デフォルトのままで無害) ---
+    // クジラの死骸が沈み切って水底に着地した瞬間からの経過時間。浮遊中・沈降中は
+    // 0のまま計測しない(update_biology側で着地を検知してから加算する)。
+    // WHALE_EXPLOSION_DELAYに達すると大爆発する。
+    #[serde(default)]
+    pub whale_landed_timer: f64,
 }
 
 // serde(default = ...) 用。0.0ではなく1.0(ニュートラル)を旧セーブの既定値にするための関数。
@@ -328,6 +334,7 @@ impl Fish {
             feed_efficiency_mult: 1.0,
             lifespan_mult: 1.0,
             growth_cap_variance: 0,
+            whale_landed_timer: 0.0,
         }
     }
 
