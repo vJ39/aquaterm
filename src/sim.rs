@@ -56,6 +56,9 @@ pub const GENERAL_GROWTH_SCALE_STEP: f64 = 0.15; // 1段階あたりの見た目
 pub const SIZE_SPEED_PENALTY_STEP: f64 = 0.05;
 // タコはデフォルトで他種より大きく見せる(成長段階によるスケールとは別枠のベース倍率)。
 pub const OCTOPUS_BASE_SCALE_BONUS: f64 = 0.5;
+// クジラはネタ枠の巨大魚として、他のどの種よりもずば抜けて大きく見せる(成長段階による
+// スケールとは別枠のベース倍率)。1.0のベースに加算されるため、見た目は通常成魚の約3.5倍になる。
+pub const WHALE_BASE_SCALE_BONUS: f64 = 2.5;
 
 // --- サイズと機敏さの連動(新規): 小さい魚ほど通常時もキビキビ ---
 // 「大きくなるほど遅くなる」(SIZE_SPEED_PENALTY_STEP)と対になる形で、稚魚(Fry)や
@@ -1581,6 +1584,15 @@ impl Simulation {
         octo.hidden_timer = self.rng.range(OCTOPUS_EMERGE_TIME_MIN, OCTOPUS_EMERGE_TIME_MAX);
         self.fish.push(octo);
         self.set_message("タコを1匹投入しました");
+    }
+
+    // `W`キー: クジラを1匹、確実に水槽に投入する。クジラはネタ枠の巨大魚として、通常の
+    // `+`キー(ランダム追加)・初期配置・孵化のいずれからも生成されない特殊入手種のため、
+    // ピラニアの`S`キー・タコの`O`キーと同様の専用ショートカットを用意する。巣や隠れる
+    // 挙動は持たず、無害な通常魚として振る舞うだけなので、生成処理は add_piranha と同じ形。
+    // 上限(ADD_FISH_MANUAL_CAP・個体数上限)の扱いも add_fish/add_piranha と同じ。
+    pub fn add_whale(&mut self, pix_w: usize, pix_h: usize) {
+        self.add_fish_of_species(Species::Whale, pix_w, pix_h);
     }
 
     fn add_fish_of_species(&mut self, sp: Species, pix_w: usize, pix_h: usize) {
@@ -3732,6 +3744,9 @@ fn is_excluded_as_prey(
     if self_index == candidate_index || candidate_dead {
         return true;
     }
+    if candidate_species == Species::Whale {
+        return true; // クジラは(ネタ巨大魚のため)誰からも捕食対象にならない
+    }
     if candidate_species == Species::Octopus && candidate_hidden {
         return true; // タコは隠れている間は誰からも捕食対象にならない
     }
@@ -3774,6 +3789,7 @@ pub fn species_name(sp: Species) -> &'static str {
         Species::Angelfish => "エンゼルフィッシュ",
         Species::Betta => "ベタ",
         Species::Octopus => "タコ",
+        Species::Whale => "クジラ",
     }
 }
 
@@ -8851,6 +8867,126 @@ mod tests {
             octopus.render_scale(),
             1.0 + OCTOPUS_BASE_SCALE_BONUS,
             "タコのベース倍率はOCTOPUS_BASE_SCALE_BONUS分だけ上乗せされるはず"
+        );
+    }
+
+    #[test]
+    fn add_whale_always_adds_a_whale() {
+        // Wキー: ランダムではなく確実にクジラを追加できる。
+        let (w, h) = (800, 200);
+        let mut sim = Simulation::new(Rng::new(196));
+        for _ in 0..5 {
+            sim.add_whale(w, h);
+        }
+        assert_eq!(sim.fish_count(), 5, "5回呼べば5匹追加されるはず");
+        assert!(
+            sim.fish.iter().all(|f| f.species == Species::Whale),
+            "add_whale で追加されるのは常にクジラのはず"
+        );
+    }
+
+    #[test]
+    fn add_whale_is_capped_at_manual_cap() {
+        let (w, h) = (800, 200);
+        assert!(capacity(w, h) > ADD_FISH_MANUAL_CAP, "テスト前提: 水槽容量はADD_FISH_MANUAL_CAPより大きい");
+        let mut sim = Simulation::new(Rng::new(197));
+        for _ in 0..(ADD_FISH_MANUAL_CAP + 10) {
+            sim.add_whale(w, h);
+        }
+        assert_eq!(
+            sim.fish_count(),
+            ADD_FISH_MANUAL_CAP,
+            "Wキーでの追加も+キーと同じくADD_FISH_MANUAL_CAPで頭打ちになるはず"
+        );
+    }
+
+    #[test]
+    fn add_whale_respects_tank_capacity_too() {
+        // ADD_FISH_MANUAL_CAPより小さい水槽容量でも、そちらの上限が優先されて超えない。
+        let (w, h) = (40, 20); // capacity は最小の5になる
+        let cap = capacity(w, h);
+        assert!(cap < ADD_FISH_MANUAL_CAP, "テスト前提: 水槽容量がADD_FISH_MANUAL_CAPより小さいこと");
+        let mut sim = Simulation::new(Rng::new(198));
+        for _ in 0..20 {
+            sim.add_whale(w, h);
+        }
+        assert_eq!(sim.fish_count(), cap, "水槽容量の上限で頭打ちになるはず");
+    }
+
+    #[test]
+    fn whale_is_never_valid_prey() {
+        // クジラはネタ枠の巨大魚のため、どんな状況でも(通常の捕食者からも、無敵の
+        // 一時的捕食者からも)捕食対象にならない。判定ロジックを直接呼んで検証する。
+        // 通常の捕食者(捕食モードのピラニア)からは対象外。
+        assert!(
+            is_excluded_as_prey(
+                Species::Piranha,
+                0,
+                0,
+                false, // 捕食側は無敵ではない
+                0,
+                1,
+                Species::Whale,
+                false,
+                false,
+                false,
+                false,
+                0,
+                0,
+            ),
+            "通常の捕食者からもクジラは捕食対象にならないはず"
+        );
+        // 無敵の一時的捕食者(通常なら捕食者すら襲える)からも対象外。
+        assert!(
+            is_excluded_as_prey(
+                Species::Neon,
+                0,
+                0,
+                true, // 捕食側が無敵(一時的捕食者反転)
+                0,
+                1,
+                Species::Whale,
+                false,
+                false,
+                false,
+                false,
+                0,
+                0,
+            ),
+            "無敵の一時的捕食者からもクジラは捕食対象にならないはず"
+        );
+    }
+
+    #[test]
+    fn species_name_of_whale_is_kujira() {
+        assert_eq!(species_name(Species::Whale), "クジラ");
+    }
+
+    #[test]
+    fn whale_has_the_largest_default_render_scale() {
+        // クジラはネタ枠の巨大魚として、タコよりも、どの通常種よりもデフォルトの
+        // render_scale()が大きいはず。
+        let whale = Fish::new(Species::Whale, Stage::Adult, 40.0, 20.0);
+        let octopus = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        assert!(
+            whale.render_scale() > octopus.render_scale(),
+            "クジラのデフォルトサイズはタコより大きいはず(whale={} octopus={})",
+            whale.render_scale(),
+            octopus.render_scale()
+        );
+        for &sp in &Species::COMMON {
+            let other = Fish::new(sp, Stage::Adult, 40.0, 20.0);
+            assert!(
+                whale.render_scale() > other.render_scale(),
+                "クジラのデフォルトサイズは通常種({sp:?})より大きいはず(whale={} other={})",
+                whale.render_scale(),
+                other.render_scale()
+            );
+        }
+        assert_eq!(
+            whale.render_scale(),
+            1.0 + WHALE_BASE_SCALE_BONUS,
+            "クジラのベース倍率はWHALE_BASE_SCALE_BONUS分だけ上乗せされるはず"
         );
     }
 }

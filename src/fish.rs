@@ -6,7 +6,7 @@ use crate::sim::{
     AGILITY_FRY_SIZE_STEPS, AGILITY_MULT_MAX, AGILITY_MULT_MIN, AGILITY_STEP, FULL_THRESHOLD,
     GENERAL_GROWTH_SCALE_STEP, GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE, HUNGRY_THRESHOLD, MAX_HUNGER,
     OCTOPUS_BASE_SCALE_BONUS, PIRANHA_KILL_GROWTH_SCALE_STEP, PIRANHA_MAX_KILL_STAGE,
-    SIZE_SPEED_PENALTY_STEP,
+    SIZE_SPEED_PENALTY_STEP, WHALE_BASE_SCALE_BONUS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +27,7 @@ pub enum Species {
     Angelfish, // 縦長で優雅な新種。銀白+黒の縞模様、ゆったり泳ぐ
     Betta,     // 派手な長いヒレを持つ新種(ベタ風)。単独行動気味・反応は速い
     Octopus,   // タコ。ピラニアとは別の捕食者。タコつぼに隠れ、時々出てきて泳ぐ(Sキー等の特殊入手扱い)
+    Whale,     // クジラ。現実の巨大魚をモチーフにしたネタ枠の特殊入手種(Wキー)。他種よりずば抜けて大きい以外は無害な通常魚として振る舞う
 }
 
 impl Species {
@@ -53,6 +54,7 @@ impl Species {
             Species::Angelfish => 48.0, // 優雅にゆったり
             Species::Betta => 76.0,     // 単独行動・反応は速い
             Species::Octopus => 56.0,  // 慎重に動く待ち伏せ型
+            Species::Whale => 28.0,    // 巨体ゆえ全種で最もゆっくり泳ぐ
         }
     }
 
@@ -66,6 +68,7 @@ impl Species {
             Species::Angelfish => 40.0, // 優雅にゆったり、あまりせわしなく動かない
             Species::Betta => 96.0,     // 気が強く動きが多い
             Species::Octopus => 36.0,  // 普段は物陰でじっとしている慎重な生き物
+            Species::Whale => 18.0,    // 巨体でゆったり泳ぎ、せわしなく動かない
         }
     }
 
@@ -80,6 +83,7 @@ impl Species {
             Species::Angelfish => 112.0,
             Species::Betta => 180.0,
             Species::Octopus => 48.0, // 通常の餌にはほぼ反応しない(捕食の方が効率よい)
+            Species::Whale => 30.0,   // ネタ枠の観賞用巨大魚で、餌にはほとんど反応しない
         }
     }
 
@@ -88,9 +92,9 @@ impl Species {
         matches!(self, Species::Piranha | Species::Octopus)
     }
 
-    // 産卵(繁殖)するかどうか。ピラニア・タコは特殊入手種として、通常の産卵→孵化からは除外する。
+    // 産卵(繁殖)するかどうか。ピラニア・タコ・クジラは特殊入手種として、通常の産卵→孵化からは除外する。
     pub fn breeds(self) -> bool {
-        !matches!(self, Species::Piranha | Species::Octopus)
+        !matches!(self, Species::Piranha | Species::Octopus | Species::Whale)
     }
 }
 
@@ -333,12 +337,13 @@ impl Fish {
         } else {
             0.0
         };
-        // タコはデフォルトで他種より大きく見せたいという要望への対応。成長段階に
-        // よるスケールとは別枠の、種固有のベース倍率として加算する。
-        let species_bonus = if matches!(self.species, Species::Octopus) {
-            OCTOPUS_BASE_SCALE_BONUS
-        } else {
-            0.0
+        // タコ・クジラはデフォルトで他種より大きく見せたいという要望への対応。成長段階に
+        // よるスケールとは別枠の、種固有のベース倍率として加算する。クジラはネタ枠の巨大魚
+        // として、他のどの種よりもずば抜けて大きい倍率を持たせる。
+        let species_bonus = match self.species {
+            Species::Octopus => OCTOPUS_BASE_SCALE_BONUS,
+            Species::Whale => WHALE_BASE_SCALE_BONUS,
+            _ => 0.0,
         };
         1.0 + species_bonus + general + kill
     }
@@ -581,6 +586,33 @@ impl Sprite {
                 "AB.BAB.BAB.BAB.BA",
                 ".................",
             ],
+            // クジラ(ネタ枠の巨大魚)。全種で最も横に長く大きいシルエットにする。
+            // 左端に上下へ大きく開く尾びれ(<)、中央上部に小さな背びれの隆起(F)、
+            // 右側(頭)寄りに目(E)、腹側に淡い色の帯(A)を配した紡錘形の胴体。
+            // Fry(稚魚)側は同じ形の考え方で小さく描く。
+            (Species::Whale, Stage::Fry) => &[
+                "......FFF......",
+                "<....BBBBBBB...",
+                "<<.BBBBBBBBBB..",
+                ".<<BBBBBBBBBEB.",
+                "<<.BBBBBBBBBB..",
+                "<....BAAAABB...",
+            ],
+            (Species::Whale, Stage::Adult) => &[
+                "<.............FFF..........",
+                "<<...........FFFFF.........",
+                ".<<......BBBBBBBBBBBBBB....",
+                ".<<....BBBBBBBBBBBBBBBBB...",
+                "..<<.BBBBBBBBBBBBBBBBBBBB..",
+                "..<<BBBBBBBBBBBBBBBBBBBEBB.",
+                "..<<BBBBBBBBBBBBBBBBBBBBBB.",
+                "..<<BBBBBBBBBBBBBBBBBBBBBB.",
+                "..<<.BBBBAAAAAAAAAAAABBBB..",
+                ".<<....BBAAAAAAAAAABBBBB...",
+                ".<<......BBBBBBBBBBBBBB....",
+                "<<.........................",
+                "<..........................",
+            ],
         };
         Sprite::parse(lines, palette(species))
     }
@@ -674,6 +706,12 @@ fn palette(species: Species) -> Palette {
             accent: Color::new(190, 120, 130), // まだら模様(吸盤・斑点)
             eye: Color::new(15, 8, 10),
             fin: Color::new(130, 65, 75),
+        },
+        Species::Whale => Palette {
+            body: Color::new(55, 70, 90),     // 濃い青灰色(クジラらしい体色)
+            accent: Color::new(200, 205, 210), // 淡い灰白色の腹側
+            eye: Color::new(10, 12, 16),
+            fin: Color::new(42, 54, 72),      // 体よりわずかに暗いヒレ
         },
     }
 }

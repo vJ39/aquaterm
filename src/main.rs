@@ -533,6 +533,7 @@ fn handle_key(
         KeyCode::Char('+') | KeyCode::Char('=') => sim.add_fish(fb.pix_width(), fb.pix_height()),
         KeyCode::Char('S') => sim.add_piranha(fb.pix_width(), fb.pix_height()),
         KeyCode::Char('O') => sim.add_octopus(fb.pix_width(), fb.pix_height()),
+        KeyCode::Char('W') => sim.add_whale(fb.pix_width(), fb.pix_height()),
         KeyCode::Char('D') => sim.reposition_dens(fb.pix_width(), fb.pix_height()),
         KeyCode::Char('P') => sim.reposition_plants(fb.pix_width(), fb.pix_height()),
         KeyCode::Char('-') => sim.remove_fish(),
@@ -1402,6 +1403,7 @@ fn dex_entries() -> Vec<(&'static str, &'static str, Species)> {
         ("ベタ", "派手なヒレ", Species::Betta),
         ("ピラニア", "捕食者(Sキー)", Species::Piranha),
         ("タコ", "捕食者(Oキー)", Species::Octopus),
+        ("クジラ", "巨大・ネタ枠(Wキー)", Species::Whale),
     ]
 }
 
@@ -1411,11 +1413,12 @@ fn dex_entries() -> Vec<(&'static str, &'static str, Species)> {
 // 取り残されていたのを見落とした事故があったため、dex_entries_covers_all_species_names
 // のテストで両者の一致を機械的に検証する)。7種類分を1行に収めると幅が長くなりすぎるため、
 // 複数行に分けている。
-fn dex_fallback_lines() -> [&'static str; 5] {
+fn dex_fallback_lines() -> [&'static str; 6] {
     [
         "  種類: ネオン(青) / 金魚(オレンジ) / グッピー(白+差し色)",
         "        エンゼルフィッシュ(縦長で優雅) / ベタ(派手なヒレ)",
         "  捕食者: ピラニア(銀色+腹に赤み) / タコ(つぼに隠れ、時々出てくる)",
+        "  特殊: クジラ(ずば抜けて大きいネタ枠・Wキーで追加、捕食も繁殖もしない)",
         "  観賞用: カニ・エビ(水底を歩く) / タツノオトシゴ(藻の近くを漂う)も泳いでいます",
         "",
     ]
@@ -1619,7 +1622,7 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "    p  一時停止/再開    [ / ]  速度変更    ,  設定画面    ?  ヘルプ    q  終了",
         "",
         "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
-        "          + - 追加/間引き / S ピラニア / O タコ / M 肉餌 / D タコつぼ / P 水草",
+        "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / D タコつぼ / P 水草",
         "          H 全員空腹に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
         "          J 水質トグル / X ランダム死亡 / Z スター投入(いずれもデバッグ)",
         "",
@@ -1729,14 +1732,14 @@ mod tests {
         assert!(w < 200, "ロゴの幅が異常に大きくなっていないか: {w}");
     }
 
-    // ヘルプ画面の図鑑: 通常3種+ピラニアの4種類を対象にすること
+    // ヘルプ画面の図鑑: 通常5種+ピラニア+タコ+クジラの8種類を対象にすること
     #[test]
-    fn dex_entries_cover_all_seven_species() {
+    fn dex_entries_cover_all_eight_species() {
         let entries = dex_entries();
         assert_eq!(
             entries.len(),
-            7,
-            "ネオン/金魚/グッピー/エンゼルフィッシュ/ベタ/ピラニア/タコの7種類のはず"
+            8,
+            "ネオン/金魚/グッピー/エンゼルフィッシュ/ベタ/ピラニア/タコ/クジラの8種類のはず"
         );
         assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Neon));
         assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Goldfish));
@@ -1745,6 +1748,7 @@ mod tests {
         assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Betta));
         assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Piranha));
         assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Octopus));
+        assert!(entries.iter().any(|(_, _, sp)| *sp == Species::Whale));
     }
 
     // 回帰テスト: 狭い端末向けのテキストのみフォールバック行が、図鑑本体
