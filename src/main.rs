@@ -1033,7 +1033,11 @@ fn render_tank(
             .fold(f64::INFINITY, f64::min);
         let hide_alpha = (1.0 - nearest_cover_dist / sim::ALGAE_HIDE_RADIUS).clamp(0.0, 1.0)
             * sim::ALGAE_HIDE_MIX;
-        let sprite = f.sprite();
+        let sprite = if corpse_uses_lying_sprite(f) {
+            f.lying_sprite()
+        } else {
+            f.sprite()
+        };
         let scale = f.render_scale();
         let out_w = ((sprite.width as f64) * scale).round().max(1.0) as isize;
         let out_h = ((sprite.height as f64) * scale).round().max(1.0) as isize;
@@ -1075,6 +1079,16 @@ fn scaled_cell_bounds(index: usize, scale: f64, output_len: isize) -> (isize, is
     (start.clamp(0, output_len), end.clamp(0, output_len))
 }
 
+// 水底に完全に沈み切った死骸(f.settled_at_bottom)に、専用の絵柄を持つ種
+// (fish::has_lying_sprite)だけ、通常の泳ぎ姿+上下反転(仰向け)ではなく横倒れ
+// 専用スプライトを使うべきかどうか。描画するスプライトの選択(render_tank)と、
+// 選んだスプライトへの上下反転適用の有無(draw_fish_sprite_cells)の両方で同じ
+// 判定を使うため、ここに1箇所だけ定義する。浮遊中・沈降中や対象外種は
+// 従来通りfalse(通常スプライト+上下反転)になる。
+fn corpse_uses_lying_sprite(f: &Fish) -> bool {
+    f.dead && f.settled_at_bottom && fish::has_lying_sprite(f.species)
+}
+
 // 魚1匹分のスプライトを、各セルごとに連続した矩形として展開して描く。
 // (出力ピクセルごとに元ピクセルを逆引きする最近傍サンプリングだと、非整数倍率で
 // 列ごとの複製回数が不均一になり輪郭がガタつくため、元ピクセル基準で塗る)
@@ -1098,6 +1112,11 @@ fn draw_fish_sprite_cells(
         (Species::Octopus, Stage::Fry) => Some(4),
         _ => None,
     };
+    // 横倒れ専用スプライト(呼び出し元がsprite引数にlying_sprite()を渡している)を
+    // 使っている間は、その絵自体がすでに「横倒れ」の見た目になっているため、
+    // 上下反転(仰向け)を重ねて適用しない。まだ浮遊中・沈降中、または
+    // lying_sprite未対応の種は従来通り上下反転する。
+    let use_lying_sprite = corpse_uses_lying_sprite(f);
     for &(src_dx, src_dy, base) in &sprite.pixels {
         // 進行方向で左右反転・死亡演出中は仰向け(上下反転)。参照する元ピクセルは
         // そのままに、描画先のマス目を反転させることで同じ見た目にする。
@@ -1106,7 +1125,7 @@ fn draw_fish_sprite_cells(
         } else {
             sprite.width - 1 - src_dx
         };
-        let draw_dy = if f.dead {
+        let draw_dy = if f.dead && !use_lying_sprite {
             sprite.height - 1 - src_dy
         } else {
             src_dy
@@ -2203,6 +2222,81 @@ mod tests {
                 "{sp:?}: ヒレの明滅は控えめであるはず(max_channel_delta={max_channel_delta}, allowed<={allowed})"
             );
         }
+    }
+
+    // 横倒れスプライトへの切り替え判定(corpse_uses_lying_sprite)は、死亡していて
+    // かつ水底に沈み切っており(settled_at_bottom)、かつ対応種(has_lying_sprite)の
+    // 場合だけtrueになるはず。生存中・浮遊中/沈降中・スコープ外種(ピラニア・
+    // タコ・クジラ)のいずれもfalseのままであることを確認する。
+    #[test]
+    fn corpse_uses_lying_sprite_requires_dead_settled_and_a_supported_species() {
+        let mut f = Fish::new(Species::Neon, Stage::Adult, 10.0, 10.0);
+        assert!(!corpse_uses_lying_sprite(&f), "生存中はfalseのはず");
+
+        f.dead = true;
+        assert!(
+            !corpse_uses_lying_sprite(&f),
+            "死亡直後(まだsettled_at_bottom=false、浮遊中/沈降中相当)はfalseのはず"
+        );
+
+        f.settled_at_bottom = true;
+        assert!(
+            corpse_uses_lying_sprite(&f),
+            "死亡+水底へ着地済み+対応種の組み合わせだけtrueになるはず"
+        );
+
+        for sp in [Species::Piranha, Species::Octopus, Species::Whale] {
+            let mut out_of_scope = Fish::new(sp, Stage::Adult, 10.0, 10.0);
+            out_of_scope.dead = true;
+            out_of_scope.settled_at_bottom = true;
+            assert!(
+                !corpse_uses_lying_sprite(&out_of_scope),
+                "{sp:?}: 今回のスコープ外の種は着地済みでもfalseのままのはず"
+            );
+        }
+    }
+
+    // 実際の描画パイプライン(draw_fish_sprite_cells)を通して、水底に沈み切った
+    // 死骸(横倒れスプライトを使う)が、まだ浮遊中/沈降中の死骸(従来の上下反転=
+    // 仰向け)とは異なる見た目になることを確認する回帰テスト。
+    #[test]
+    fn settled_common_species_corpse_renders_differently_from_a_floating_one() {
+        let render = |settled_at_bottom: bool| {
+            let mut fb = FrameBuffer::new(40, 10); // 論理ピクセルは40x20
+            let pw = fb.pix_width();
+            let ph = fb.pix_height();
+            let mut f = Fish::new(Species::Neon, Stage::Adult, 15.0, 10.0);
+            f.dead = true;
+            f.settled_at_bottom = settled_at_bottom;
+            f.facing_right = true;
+            let sprite = if corpse_uses_lying_sprite(&f) {
+                f.lying_sprite()
+            } else {
+                f.sprite()
+            };
+            let scale = f.render_scale();
+            let out_w = ((sprite.width as f64) * scale).round().max(1.0) as isize;
+            let out_h = ((sprite.height as f64) * scale).round().max(1.0) as isize;
+            let left = f.x.round() as isize - out_w / 2;
+            let top = f.y.round() as isize - out_h / 2;
+            draw_fish_sprite_cells(&mut fb, &f, &sprite, scale, left, top, 0.0, 0.0, pw, ph);
+            fb
+        };
+
+        let floating = render(false);
+        let settled = render(true);
+        let mut differs = false;
+        for y in 0..floating.pix_height() {
+            for x in 0..floating.pix_width() {
+                if floating.get_pixel(x, y) != settled.get_pixel(x, y) {
+                    differs = true;
+                }
+            }
+        }
+        assert!(
+            differs,
+            "水底に沈み切った死骸は、浮遊中/沈降中の死骸(仰向け)とは異なる見た目で描かれるはず"
+        );
     }
 
     // SEの種類ごとの個別トグル(sfx_enabled_for)のテスト用に、全トグルON(既定値)の

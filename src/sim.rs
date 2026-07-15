@@ -2738,6 +2738,10 @@ impl Simulation {
                 // 浮力は時間とともに単調に減衰するだけなので、一度水底に着地したら
                 // 再び浮くことはなく、この判定だけで「着地済み」を表せる。
                 let settled_at_bottom = f.y >= bottom_y - 0.01;
+                // main.rs側の描画(横倒れポーズ選択)がこの着地状態を直接読めるように、
+                // Fish構造体のフィールドとしても同期させておく(ローカル変数だけでは
+                // sim.rsの外から見えない)。
+                f.settled_at_bottom = settled_at_bottom;
                 if !settled_at_bottom {
                     // f.ageは死亡時点で増加が止まるため、個体ごとに位相をずらす
                     // 安定したオフセットとして使える。
@@ -8546,6 +8550,60 @@ mod tests {
         assert_eq!(
             sim.fish[0].x, settled_x,
             "水底に着地した亡骸は揺れずx座標が変化しないはず"
+        );
+    }
+
+    #[test]
+    fn settled_at_bottom_flag_stays_false_while_the_corpse_is_still_floating() {
+        // main.rs側の横倒れスプライト選択はf.settled_at_bottomを直接読む。
+        // 死亡直後、浮力で水面へ向けて浮いている間はこのフラグがfalseのまま
+        // であること(着地前に誤ってtrueにならないこと)の回帰テスト。
+        let mut sim = Simulation::new(Rng::new(4292));
+        let mut fish = Fish::new(Species::Goldfish, Stage::Adult, 20.0, 30.0);
+        fish.dead = true;
+        fish.dead_timer = 0.0;
+        sim.fish.push(fish);
+        for _ in 0..200 {
+            sim.update(0.1, 80, 40);
+            assert!(
+                !sim.fish[0].settled_at_bottom,
+                "浮上中はsettled_at_bottomはfalseのはず(y={})",
+                sim.fish[0].y
+            );
+        }
+    }
+
+    #[test]
+    fn settled_at_bottom_flag_becomes_true_once_the_corpse_reaches_the_sand() {
+        // 浮力がほぼ消えて水底へ沈み切った瞬間からsettled_at_bottomがtrueになる
+        // ことの回帰テスト。main.rs側はこのフラグをそのまま使って横倒れ
+        // スプライトへ切り替えるため、着地の検知が正しく個体へ反映されている
+        // ことを確認しておく。
+        let (w, h) = (80usize, 40usize);
+        let sand_top = h as f64 - sand_height(h) as f64;
+        let mut sim = Simulation::new(Rng::new(4293));
+        let mut fish = Fish::new(Species::Goldfish, Stage::Adult, 20.0, sand_top - 5.0);
+        fish.dead = true;
+        fish.dead_timer = CORPSE_REMOVE_TIME / 2.0; // 浮力はほぼ消えている想定
+        sim.fish.push(fish);
+        assert!(
+            !sim.fish[0].settled_at_bottom,
+            "着地前(水底より上)ではまだfalseのはず"
+        );
+
+        for _ in 0..50 {
+            sim.update(0.1, w, h);
+        }
+        assert!(
+            sim.fish[0].settled_at_bottom,
+            "十分な時間が経てば水底に着地してtrueになるはず(y={})",
+            sim.fish[0].y
+        );
+        assert!(
+            sim.fish[0].y >= sand_top - 1.0 - 0.01,
+            "settled_at_bottomがtrueなら実際に水底近くにいるはず(y={} sand_top={})",
+            sim.fish[0].y,
+            sand_top
         );
     }
 

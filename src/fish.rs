@@ -132,6 +132,11 @@ pub struct Fish {
     // 死亡してからの経過時間(一定時間で水槽から消える判定に使う)
     #[serde(default)]
     pub dead_timer: f64,
+    // 死骸が水底に完全に沈み切って静止したかどうか(sim.rs側のupdate_biologyが
+    // 毎フレーム同期する)。浮遊中・沈降中はfalseのまま。trueになった瞬間から、
+    // 描画側(main.rs)は仰向け(上下反転)ではなく横倒れの専用スプライトに切り替える。
+    #[serde(default)]
+    pub settled_at_bottom: bool,
     // ガラスを叩かれて驚き逃げている残り時間(0より大きい間、逃走方向へ加速する)
     #[serde(default)]
     pub flee_timer: f64,
@@ -319,6 +324,7 @@ impl Fish {
             octopus_bite_immunity_timer: 0.0,
             dead: false,
             dead_timer: 0.0,
+            settled_at_bottom: false,
             invincible_timer: 0.0,
             attract_timer: 0.0,
             attract_dx: 0.0,
@@ -341,6 +347,15 @@ impl Fish {
     // 描画用スプライト(種類×成長段階)
     pub fn sprite(&self) -> Sprite {
         Sprite::for_fish(self.species, self.stage, self.growth_stage)
+    }
+
+    // 水底に沈み切って横たわった死骸専用のスプライト(has_lying_spriteがtrueの
+    // 種のみ絵柄を持つ)。頭の左右は既存のfacing_right(死亡後は動きが止まるため
+    // 個体ごとに固定される)による反転をそのまま使い、どちらの体側が上を
+    // 向いているかは絵として描き分けない(左右反転だけで見た目のバリエーションを
+    // 出せば十分という判断。詳細はfor_lying_fishのコメント参照)。
+    pub fn lying_sprite(&self) -> Sprite {
+        Sprite::for_lying_fish(self.species, self.stage)
     }
 
     // 空腹度の段階
@@ -809,6 +824,127 @@ impl Sprite {
         Sprite::parse(lines, palette(species))
     }
 
+    // 水底に完全に沈み切った死骸用の「横倒れ」スプライト。通常種5種
+    // (has_lying_species)のみ専用パターンを持つ(ピラニア・タコ・クジラは今回の
+    // スコープ外。呼ばれてもfor_fishの通常成魚パターンにフォールバックする)。
+    //
+    // 通常の泳ぎ姿(for_fish)は左右対称寄りに描かれていて(上下反転しても
+    // ほぼ同じ絵になる種が多い)、これが「死んだら仰向けにするだけ」の演出だと
+    // 泳いでいる時と見分けがつきにくい原因になっていた。横倒れ姿は、その
+    // 対称性をあえて崩す作り方にする: 体の上半分(背側の行)のヒレ('F')だけを
+    // 取り除いて滑らかな輪郭にし、下半分(腹側の行)のヒレはそのまま残す。
+    // 「倒れて砂に押しつけられた側のヒレが見えなくなり、上を向いた側のヒレだけが
+    // 広がって見える」という見立て。目(E)・尾(<)がある中央の行は、向きの
+    // 手がかりを保つためどちらの半分に含めず必ず残す。
+    //
+    // 「右体側が上/左体側が上」の描き分けは絵として持たない(左右対称なドット絵の
+    // ため、体側ごとに違う模様を描いても差が見えにくい)。左右反転は既存の
+    // facing_right(死亡後は移動が止まるため死亡した瞬間の値で個体ごとに固定される)を
+    // そのまま使い、そのバリエーションだけで十分とみなした。
+    fn for_lying_fish(species: Species, stage: Stage) -> Sprite {
+        let lines: &[&str] = match (species, stage) {
+            (Species::Neon, Stage::Fry) => &[
+                "...BB....",
+                "..BBBBB..",
+                "..BAABBBE",
+                ".FBBBBB..",
+                "FF.BB....",
+            ],
+            (Species::Neon, Stage::Adult) => &[
+                ".....BBB......",
+                "....BBBBBB....",
+                "...BBAAAAABB..",
+                "...BBAAAAABBBE",
+                "..FBBAAAAABB..",
+                ".FF.BBBBBB....",
+                "FF...BBB......",
+            ],
+            (Species::Goldfish, Stage::Fry) => &[
+                "........",
+                ".BBBBBB.",
+                "<BBBBBBE",
+                ".BBBBBB.",
+                "..FFFF..",
+            ],
+            (Species::Goldfish, Stage::Adult) => &[
+                "................",
+                "......BBBB......",
+                "....BBBBBBBB....",
+                "...BBBBBBBBBBB..",
+                ".FBBBBBAAAABBBBE",
+                "..FBBBBBBBBBBB..",
+                "...FBBBBBBBB....",
+                "....FFBBBB......",
+                "......FF........",
+            ],
+            (Species::Guppy, Stage::Fry) => &[
+                "...B....",
+                "...BBB..",
+                "FFFBABBE",
+                "FFFBBB..",
+                "FF.B....",
+            ],
+            (Species::Guppy, Stage::Adult) => &[
+                "................",
+                "......BBBBB.....",
+                ".....BBBBBBBB...",
+                ".....BAAAAABBB..",
+                "FFFFFBAAAAABBBBE",
+                "FFFFFBAAAAABBB..",
+                "FFFFFBBBBBBBB...",
+                "FFFF..BBBBB.....",
+                "FF.....FF.......",
+            ],
+            (Species::Angelfish, Stage::Fry) => &[
+                "......",
+                ".AABA.",
+                ".ABBA.",
+                "<ABBAE",
+                ".ABBA.",
+                ".AABA.",
+                "..FF..",
+            ],
+            (Species::Angelfish, Stage::Adult) => &[
+                "..............",
+                "..............",
+                "......BA......",
+                ".....ABAB.....",
+                "....BABABA....",
+                "...BBABABAB...",
+                "<..BBABABAB..E",
+                "...BBABABAB...",
+                "....BABABA....",
+                "...F.ABAB.F...",
+                "....FFBAFF....",
+                ".....FFFF.....",
+                "......FF......",
+            ],
+            (Species::Betta, Stage::Fry) => &[
+                ".......",
+                ".BBBB..",
+                "<BABBFE",
+                ".BBBBF.",
+                "..FF...",
+            ],
+            (Species::Betta, Stage::Adult) => &[
+                "................",
+                ".....BBBBB......",
+                "....BBBBBBBB....",
+                "<FFBBBBAABBBBBFE",
+                "..FFBBBBBBBBFF..",
+                "....FBBBBBFF....",
+                "......FFFF......",
+                "......FF.FF.....",
+            ],
+            // ピラニア・タコ・クジラは今回のスコープ外。専用の横倒れ姿を持たないので、
+            // 通常の成魚パターン(growth_stage=0)を素通しで使う(呼び出し元は
+            // has_lying_species()でこの3種を先に除外しているため、実際には
+            // 通常プレイでは到達しない想定のフォールバック)。
+            _ => return Sprite::for_fish(species, stage, 0),
+        };
+        Sprite::parse(lines, palette(species))
+    }
+
     // 文字列スプライトを解析する。'.'/' ' は透明。
     fn parse(lines: &[&str], pal: Palette) -> Sprite {
         let height = lines.len();
@@ -913,6 +1049,16 @@ fn palette(species: Species) -> Palette {
 // 一致するかどうかで判定する(Spriteにフラグを追加する大掛かりな変更を避けるため)。
 pub fn fin_color(species: Species) -> Color {
     palette(species).fin
+}
+
+// 水底に沈み切った死骸用の「横倒れ」専用スプライト(Sprite::for_lying_fish)を
+// 持つ種かどうか。今回のスコープは通常種5種のみで、ピラニア・タコ・クジラは
+// 対象外(描画側main.rsはこれがfalseの種には従来通りの上下反転(仰向け)を使う)。
+pub fn has_lying_sprite(species: Species) -> bool {
+    matches!(
+        species,
+        Species::Neon | Species::Goldfish | Species::Guppy | Species::Angelfish | Species::Betta
+    )
 }
 
 // --- 観賞用の追加生物(育成ロジックには参加しない。見た目の賑やかしのみ) ---
@@ -1130,6 +1276,52 @@ mod tests {
                     fish.render_scale() >= 1.0,
                     "{sp:?} growth_stage={growth_stage}: render_scaleは1.0を下回ってはいけない: {}",
                     fish.render_scale()
+                );
+            }
+        }
+    }
+
+    // 横倒れ専用スプライト(has_lying_sprite)は、今回のスコープである通常5種
+    // (Species::COMMON)だけがtrueで、スコープ外のピラニア・タコ・クジラは
+    // falseのままであることを確認する(main.rs側はfalseの種には従来通りの
+    // 上下反転(仰向け)を使う)。
+    #[test]
+    fn has_lying_sprite_covers_only_the_five_common_species() {
+        for &sp in &Species::COMMON {
+            assert!(has_lying_sprite(sp), "{sp:?}: 通常種は横倒れ専用スプライトを持つはず");
+        }
+        for sp in [Species::Piranha, Species::Octopus, Species::Whale] {
+            assert!(
+                !has_lying_sprite(sp),
+                "{sp:?}: 今回のスコープ外の種は横倒れ専用スプライトを持たないはず"
+            );
+        }
+    }
+
+    // 横倒れスプライトは、通常の泳ぎ姿(sprite())をそのまま上下反転しただけの
+    // ものであってはならない(それでは既存の仰向け演出と区別できない)。
+    // Fry/Adultの両ステージで、実際に異なる絵柄になっていることを確認する。
+    #[test]
+    fn lying_sprite_is_a_distinct_pose_not_just_a_flipped_swim_sprite() {
+        for &sp in &Species::COMMON {
+            for stage in [Stage::Fry, Stage::Adult] {
+                let swim = Fish::new(sp, stage, 0.0, 0.0).sprite();
+                let lying = Fish::new(sp, stage, 0.0, 0.0).lying_sprite();
+
+                // 泳ぎ姿を上下反転した場合と同じピクセル集合になっていないかを確認する
+                // (完全対称な絵柄だと反転しても見た目が変わらず、死亡演出として
+                // 機能しないため)。
+                let mut flipped_swim: Vec<(usize, usize, Color)> = swim
+                    .pixels
+                    .iter()
+                    .map(|&(dx, dy, c)| (dx, swim.height - 1 - dy, c))
+                    .collect();
+                let mut lying_pixels = lying.pixels.clone();
+                flipped_swim.sort_by_key(|&(dx, dy, _)| (dx, dy));
+                lying_pixels.sort_by_key(|&(dx, dy, _)| (dx, dy));
+                assert_ne!(
+                    flipped_swim, lying_pixels,
+                    "{sp:?}({stage:?}): 横倒れスプライトは泳ぎ姿の単純な上下反転とは異なるはず"
                 );
             }
         }
