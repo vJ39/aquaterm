@@ -550,9 +550,8 @@ const BIG_ADULT_GROWTH_STAGE: u8 = 2;
 // パターンに切り替える閾値。growth_stageが取り得る最大値(sim.rs側の
 // GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE)そのものを使う(この段階を
 // 超えるgrowth_stageは存在しないため、独自の値を別途持つ必要はない)。
-// 対象は既にBIG_ADULT高解像度パターンを持つ通常種のうちネオン・金魚・
-// グッピー・ベタの4種のみ。エンゼルフィッシュは縦縞の連続性が崩れて
-// 見える懸念があり、実際にレンダリングして確認した上で今回は対象外とした。
+// 対象は既にBIG_ADULT高解像度パターンを持つ通常種5種(ネオン・金魚・
+// グッピー・エンゼルフィッシュ・ベタ)全て。
 const MAX_ADULT_GROWTH_STAGE: u8 = GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE;
 
 // ドットマトリクスのスプライト。原点は左上、facing で左右反転する。
@@ -780,6 +779,34 @@ impl Sprite {
                 ".ABBA.",
                 ".AABA.",
                 "..FF..",
+            ],
+            // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体専用の、BIG_ADULTより
+            // さらに一段精細なパターン(Neonと同じ約1.22倍・行列を増やしただけで
+            // シルエット自体は変えていない)。この判定はBIG_ADULT判定より先に書く
+            // 必要がある(growth_stageがMAX_ADULT_GROWTH_STAGEの個体はBIG_ADULTの
+            // 条件も満たすため、matchの順序がそのまま優先順位になる)。
+            (Species::Angelfish, Stage::Adult) if growth_stage >= MAX_ADULT_GROWTH_STAGE => &[
+                "..........FF..........",
+                ".........FFFF.........",
+                ".......FFFFFFFF.......",
+                ".......FFFFFFFF.......",
+                "......FFFBBABFFF......",
+                ".....F.AABBABBB.F.....",
+                "......BAABBABBBA......",
+                ".....BBAABBABBBAB.....",
+                ".....BBAABBABBBAB.....",
+                ".....BBAABBABBBAB.....",
+                "<<..BBBAABBABBBABB...E",
+                ".....BBAABBABBBAB.....",
+                ".....BBAABBABBBAB.....",
+                ".....BBAABBABBBAB.....",
+                "......BAABBABBBA......",
+                ".....F.AABBABBB.F.....",
+                "......FFFBBABFFF......",
+                ".......FFFFFFFF.......",
+                ".......FFFFFFFF.......",
+                ".........FFFF.........",
+                "..........FF..........",
             ],
             // エンゼルフィッシュの見た目がタツノオトシゴのように見えてしまっており、
             // もっとエンゼルフィッシュらしい見た目にしてほしいという指摘を受けて描き直した。
@@ -1605,14 +1632,21 @@ mod tests {
         }
     }
 
-    // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体を持つ4種(ネオン・金魚・
-    // グッピー・ベタ)は、BIG_ADULT_GROWTH_STAGEの高解像度パターンよりさらに
-    // 一回り大きい専用パターンに切り替わるはず。ただし基準(growth_stage=0)から
-    // 大きくなりすぎないよう、縦横ともに2倍未満に収めていることも確認する
-    // (2倍だと図鑑のグリッド計算が壊れるという過去の教訓を踏まえた上限)。
+    // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体を持つ5種(ネオン・金魚・
+    // グッピー・エンゼルフィッシュ・ベタ)は、BIG_ADULT_GROWTH_STAGEの高解像度
+    // パターンよりさらに一回り大きい専用パターンに切り替わるはず。ただし基準
+    // (growth_stage=0)から大きくなりすぎないよう、縦横ともに2倍未満に収めて
+    // いることも確認する(2倍だと図鑑のグリッド計算が壊れるという過去の
+    // 教訓を踏まえた上限)。
     #[test]
     fn max_adult_species_switch_to_an_even_bigger_but_not_oversized_sprite() {
-        for &sp in &[Species::Neon, Species::Goldfish, Species::Guppy, Species::Betta] {
+        for &sp in &[
+            Species::Neon,
+            Species::Goldfish,
+            Species::Guppy,
+            Species::Angelfish,
+            Species::Betta,
+        ] {
             let mut base = Fish::new(sp, Stage::Adult, 0.0, 0.0);
             base.growth_stage = 0;
             let base_sprite = base.sprite();
@@ -1644,7 +1678,13 @@ mod tests {
     // がこの新しい段階でも正しく相殺できていることの確認)。
     #[test]
     fn max_adult_high_resolution_sprite_is_not_scaled_twice() {
-        for &sp in &[Species::Neon, Species::Goldfish, Species::Guppy, Species::Betta] {
+        for &sp in &[
+            Species::Neon,
+            Species::Goldfish,
+            Species::Guppy,
+            Species::Angelfish,
+            Species::Betta,
+        ] {
             let mut fish = Fish::new(sp, Stage::Adult, 0.0, 0.0);
             fish.growth_stage = MAX_ADULT_GROWTH_STAGE;
             assert!(
@@ -1655,31 +1695,6 @@ mod tests {
         }
     }
 
-    // エンゼルフィッシュは、縦縞の連続性が崩れて見える懸念があるため今回の
-    // MAX_ADULT_GROWTH_STAGE専用パターンの対象外にした。growth_stageが
-    // MAX_ADULT_GROWTH_STAGEに達しても、BIG_ADULT_GROWTH_STAGEと全く同じ
-    // スプライト(次元・ピクセル内容とも)が返り続けることを確認する
-    // (対象外であることの回帰テスト)。
-    #[test]
-    fn angelfish_is_excluded_from_the_max_adult_tier() {
-        let mut big = Fish::new(Species::Angelfish, Stage::Adult, 0.0, 0.0);
-        big.growth_stage = BIG_ADULT_GROWTH_STAGE;
-        let big_sprite = big.sprite();
-
-        let mut max_adult = Fish::new(Species::Angelfish, Stage::Adult, 0.0, 0.0);
-        max_adult.growth_stage = MAX_ADULT_GROWTH_STAGE;
-        let max_sprite = max_adult.sprite();
-
-        assert_eq!(
-            (big_sprite.width, big_sprite.height),
-            (max_sprite.width, max_sprite.height),
-            "エンゼルフィッシュはMAX_ADULT_GROWTH_STAGEでもBIG_ADULTと同じ寸法のはず(対象外)"
-        );
-        assert_eq!(
-            big_sprite.pixels, max_sprite.pixels,
-            "エンゼルフィッシュはMAX_ADULT_GROWTH_STAGEでもBIG_ADULTと同じピクセル内容のはず(対象外)"
-        );
-    }
 
     // render_scaleは常に1.0以上でなければならない(1.0未満だとドットが間引かれて
     // スプライトが潰れる)。全種・全成長段階で下回らないことを確認する。
