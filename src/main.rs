@@ -650,9 +650,10 @@ fn render_tank(
     }
 
     // 岩(装飾+隠れ場所)。藻・水草と同様、近くにいる魚が視覚的に隠れられる大きさの
-    // 静的オブジェクト。
+    // 静的オブジェクト。まだ小さいとの指摘を受け、タコつぼ(DEN_SCALE)と同様の
+    // 拡大描画で大きく見せる(ALGAE_HIDE_RADIUSの拡大と合わせて隠れやすくする)。
     for r in &sim.rocks {
-        draw_sprite(fb, &fish::rock_sprite(), r.x, r.y, true, w, h, |_, _, base| base);
+        draw_sprite_scaled(fb, &fish::rock_sprite(), r.x, r.y, ROCK_SCALE, w, h);
     }
 
     // タコつぼ(装飾+タコの巣)。タコ自体をデフォルトで大きくした(OCTOPUS_BASE_SCALE_BONUS)
@@ -1172,6 +1173,10 @@ fn draw_sprite(
 // 見た目を揃える)。draw_sprite(等倍・反転のみ対応)とは別に、最近傍サンプリングで
 // scale倍に拡大して描く(魚の拡大描画と同じ考え方)。
 const DEN_SCALE: f64 = 1.4;
+// 岩をデフォルトで大きく描くための拡大率。魚が十分に隠れられる大きさにしてほしい
+// という再指摘への対応(藻はheightの拡大で対応済みだが、岩はheightのような
+// サイズフィールドを持たない固定スプライトのため、タコつぼと同じ拡大描画で対応する)。
+const ROCK_SCALE: f64 = 1.8;
 fn draw_sprite_scaled(fb: &mut FrameBuffer, sprite: &fish::Sprite, cx: f64, cy: f64, scale: f64, w: usize, h: usize) {
     let out_w = ((sprite.width as f64) * scale).round().max(1.0) as usize;
     let out_h = ((sprite.height as f64) * scale).round().max(1.0) as usize;
