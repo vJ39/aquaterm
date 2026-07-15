@@ -16,8 +16,8 @@ mod sound;
 
 use color::{
     apply_day_night, apply_murkiness, day_brightness, lerp, scale, vitality_color, water_gradient, Color, CURSOR,
-    AFFINITY_FLAG, DEAD_FLAG, GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG,
-    SICK_TINT,
+    AFFINITY_FLAG, CRITICAL_FLAG, DEAD_FLAG, GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP,
+    SICK_FLAG, SICK_TINT, WOUNDED_FLAG,
 };
 use chrono::{Local, Timelike};
 use crossterm::{
@@ -995,6 +995,13 @@ fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usi
     // なつき度フラグ: 病気フラグのさらに右に、閾値以上なついている個体だけ表示
     if f.affinity >= sim::AFFINITY_MARK_THRESHOLD {
         put(fb, f.x + half + 2.0, meter_y, AFFINITY_FLAG, w, h);
+    }
+    // 負傷フラグ: なつき度フラグのさらに右に、ピラニアに噛まれた個体だけ表示。
+    // 1回=負傷・2回以上=瀕死で、色を変えて同時には出さない(排他)。
+    if f.piranha_bite_count >= 2 {
+        put(fb, f.x + half + 3.0, meter_y, CRITICAL_FLAG, w, h);
+    } else if f.piranha_bite_count == 1 {
+        put(fb, f.x + half + 3.0, meter_y, WOUNDED_FLAG, w, h);
     }
 }
 

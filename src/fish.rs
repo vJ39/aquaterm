@@ -5,8 +5,8 @@ use crate::color::Color;
 use crate::sim::{
     AGILITY_FRY_SIZE_STEPS, AGILITY_MULT_MAX, AGILITY_MULT_MIN, AGILITY_STEP, FULL_THRESHOLD,
     GENERAL_GROWTH_SCALE_STEP, GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE, HUNGRY_THRESHOLD, MAX_HUNGER,
-    OCTOPUS_BASE_SCALE_BONUS, PIRANHA_KILL_GROWTH_SCALE_STEP, PIRANHA_MAX_KILL_STAGE,
-    SIZE_SPEED_PENALTY_STEP, WHALE_BASE_SCALE_BONUS,
+    OCTOPUS_BASE_SCALE_BONUS, PIRANHA_BITE_SPEED_MULT, PIRANHA_KILL_GROWTH_SCALE_STEP,
+    PIRANHA_MAX_KILL_STAGE, SIZE_SPEED_PENALTY_STEP, WHALE_BASE_SCALE_BONUS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -228,6 +228,12 @@ pub struct Fish {
     // meals_since_fullを0に戻す(「食欲がなくても無限に追いかけまわす」バグの修正)。
     #[serde(default)]
     pub piranha_quota_timer: f64,
+    // ピラニアに噛まれた回数(0〜2)。3回目の噛みつきで死亡演出に入る(update_predation側で判定)。
+    #[serde(default)]
+    pub piranha_bite_count: u8,
+    // 直近の被噛みつきからの経過時間。PIRANHA_BITE_RECOVER_INTERVALごとに1段階回復する。
+    #[serde(default)]
+    pub piranha_bite_recover_timer: f64,
     // --- 個体差(全種共通。同じ種でも個体ごとにばらつく) ---
     // 空腹になる速さの倍率(HUNGER_DECAYに乗算)。1.0が標準、大きいほど早く空腹になる。
     // 旧セーブにフィールドが無い場合も1.0(ニュートラル・挙動不変)にする。
@@ -298,6 +304,8 @@ impl Fish {
             affinity_cooldown: 0.0,
             piranha_meals_since_full: 0,
             piranha_quota_timer: 0.0,
+            piranha_bite_count: 0,
+            piranha_bite_recover_timer: 0.0,
             hunger_decay_mult: 1.0,
             feed_efficiency_mult: 1.0,
             lifespan_mult: 1.0,
@@ -328,11 +336,11 @@ impl Fish {
             HungerLevel::Normal => 1.0,
             HungerLevel::Hungry => 1.3,
         };
-        if self.sick {
-            base * 0.5
-        } else {
-            base
-        }
+        let sick_mult = if self.sick { 0.5 } else { 1.0 };
+        // ピラニアに噛まれて負傷しているほど遊泳速度が落ちる(弱るほど逃げ足が遅くなり、
+        // 追加で噛まれやすくなる)。噛まれていない個体はインデックス0で倍率1.0=無影響。
+        let wound_mult = PIRANHA_BITE_SPEED_MULT[self.piranha_bite_count.min(2) as usize];
+        base * sick_mult * wound_mult
     }
 
     // 見た目の拡大率(1.0=通常成魚サイズ)。全種共通の成長段階(growth_stage)に、

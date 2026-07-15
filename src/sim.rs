@@ -363,6 +363,15 @@ pub const PIRANHA_QUOTA_GRACE_PERIOD: f64 = 60.0;
 // 同種(ピラニア)を無条件に対象外とするのではなく、十分サイズ差(成長段階+捕食成長段階の
 // 合計)があるときだけ対象に含める。近いサイズ同士は対象外のまま(共食いの乱発を防ぐ)。
 pub const PIRANHA_CANNIBALISM_MIN_SIZE_ADVANTAGE: i32 = 2;
+// ピラニアに噛まれた回数がこの値に達すると死亡演出に入る(1発ごとに弱る3段階制)。
+pub const PIRANHA_BITES_TO_KILL: u8 = 3;
+// 噛まれてから何もなければ、この間隔(秒)ごとにpiranha_bite_countが1段階ずつ回復する。
+// PIRANHA_HUNT_COOLDOWN(15秒)より十分長くして、居座る1匹のピラニアが連続で
+// 弱らせ切れる程度の猶予は残しつつ、逃げ切れれば時間経過で癒えるようにする。
+pub const PIRANHA_BITE_RECOVER_INTERVAL: f64 = 45.0;
+// 負傷段階に応じた遊泳速度の倍率(弱るほど逃げ足が遅くなり、追加で噛まれやすくなる)。
+// インデックスはpiranha_bite_count(0=無傷)に対応する。
+pub const PIRANHA_BITE_SPEED_MULT: [f64; 3] = [1.0, 0.8, 0.55];
 // 血飛沫演出: もっと派手・グロテスクに強化してほしいという要望を受けて、
 // 単一の一瞬エフェクトから、複数粒子が散らばって尾を引くように少しずつ消える演出に強化した。
 pub const BLOOD_EFFECT_LIFETIME: f64 = 1.6; // 表示時間(旧0.5秒→1〜2秒程度に延長)
@@ -3294,6 +3303,16 @@ impl Simulation {
             f.affinity_cooldown = (f.affinity_cooldown - dt).max(0.0);
             f.affinity = (f.affinity - AFFINITY_DECAY_PER_SEC * dt).max(0.0);
 
+            // ピラニアに噛まれた負傷は、しばらく追加で噛まれなければ時間経過で1段階ずつ癒える
+            // (死亡演出中の個体はループ冒頭で除外済みなので、生きている個体だけが対象)。
+            if f.piranha_bite_count > 0 {
+                f.piranha_bite_recover_timer += dt;
+                if f.piranha_bite_recover_timer >= PIRANHA_BITE_RECOVER_INTERVAL {
+                    f.piranha_bite_count -= 1;
+                    f.piranha_bite_recover_timer = 0.0;
+                }
+            }
+
             // 病気の発症: 腹ぺこ長期 or 過密で確率的に発症。ガラスを叩きすぎた直後は
             // ストレスにより発症確率が一時的に上がる。
             if !f.sick {
@@ -3674,15 +3693,31 @@ impl Simulation {
                     self.fish[si].piranha_meals_since_full = 0;
                 }
             }
+            // ピラニアの何発目の噛みつきかを控えておく(メッセージの出し分けに使う)。
+            // 1発目=負傷・2発目=瀕死・PIRANHA_BITES_TO_KILL発目=死亡。増分前の値を基準に
+            // するので、まだ噛まれていない獲物なら1になる。
+            let piranha_bite_number = if predator_species == Species::Piranha {
+                self.fish[pi].piranha_bite_count + 1
+            } else {
+                0
+            };
             if predator_species == Species::Piranha {
-                // ピラニアの捕食は即消滅させず、出血して力尽きた死骸として残す
-                // (浮上→沈降→カニの片付け、または24時間で自動消滅する通常の死骸
-                // パイプラインに乗せる。`t`キーでつついて沈降を早める既存の仕組みも
-                // そのまま効く)。獲物がタコだった場合のタコつぼの後始末は、死因を
-                // 問わず死んだタコを処理する既存の汎用経路(update_biologyの
+                // ピラニアの捕食は即消滅させず、まず段階的に弱らせる(1発では死なず、
+                // PIRANHA_BITES_TO_KILL発目でようやく死亡演出に入る)。噛まれ続けている
+                // 間は回復タイマーをリセットして、居座られると弱っていくようにする。
+                // 死亡時は出血して力尽きた死骸として残し、浮上→沈降→カニの片付け、または
+                // 24時間で自動消滅する通常の死骸パイプラインに乗せる(`t`キーでつついて
+                // 沈降を早める既存の仕組みもそのまま効く)。獲物がタコだった場合のタコつぼの
+                // 後始末は、死因を問わず死んだタコを処理する既存の汎用経路(update_biologyの
                 // CORPSE_REMOVE_TIME経過時・update_crabsのカニ片付け時)に任せる。
-                self.fish[pi].dead = true;
-                self.fish[pi].dead_timer = 0.0;
+                self.fish[pi].piranha_bite_recover_timer = 0.0;
+                if self.fish[pi].piranha_bite_count + 1 >= PIRANHA_BITES_TO_KILL {
+                    // 最後の一噛み: Xキー(debug_kill_random_fish)と同じ死亡状態にする。
+                    self.fish[pi].dead = true;
+                    self.fish[pi].dead_timer = 0.0;
+                } else {
+                    self.fish[pi].piranha_bite_count += 1;
+                }
             } else {
                 // タコ・無敵の一時的捕食者による捕食は従来どおり即消滅させる。
                 // タコが捕食されて消える場合、CORPSE_REMOVE_TIME経過やカニによる片付けを
@@ -3730,12 +3765,16 @@ impl Simulation {
             // 死骸放置ぶんの悪化(POLLUTION_PER_DEAD_FISH)も別途乗る。
             self.pollution = (self.pollution + POLLUTION_PREDATION_SPIKE).min(POLLUTION_MAX);
             if predator_species == Species::Piranha {
-                // ピラニアの捕食は即消滅ではなく出血死のため、消えたのではなく力尽きた
-                // という表現にする(他の死因で使っている「力尽きた」と同じ言い回し)。
-                self.set_message(format!(
-                    "{}がピラニアに襲われ力尽きた…",
-                    species_name(prey_species)
-                ));
+                // 噛みつき段階に応じてメッセージを変える。最後の一噛み(死亡)は他の死因と
+                // 同じ「力尽きた」の言い回しにそろえる(消えたのではなく出血して死ぬため)。
+                let msg = if piranha_bite_number >= PIRANHA_BITES_TO_KILL {
+                    format!("{}がピラニアに襲われ力尽きた…", species_name(prey_species))
+                } else if piranha_bite_number == 1 {
+                    format!("{}がピラニアにがぶりとやられた…", species_name(prey_species))
+                } else {
+                    format!("{}がピラニアに噛まれ瀕死になった…", species_name(prey_species))
+                };
+                self.set_message(msg);
             } else {
                 self.set_message(format!("{}が食べられた…", species_name(prey_species)));
             }
@@ -4161,8 +4200,9 @@ mod tests {
             // 300 * 0.1 = 30秒。以前は無限に固まっていた現象の再発防止として、
             // 十分な猶予(実機で確認済みの時間より長め)を確保する。
             sim.fish[1].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0; // ピラニアの捕食モードを維持
+            sim.fish[1].predation_cooldown = 0.0; // 1発では死なないため連続で噛ませる
             sim.update(0.1, w, h);
-            // ピラニアの捕食は即消滅させず死骸を残すため、「捕食が成立した」=
+            // ピラニアの噛みつきは即消滅させず段階的に弱らせるため、「捕食が成立した」=
             // 追い詰めた魚(index 0)が死亡状態になった、で判定する。
             if sim.fish[0].dead {
                 caught = true;
@@ -5773,16 +5813,17 @@ mod tests {
         for _ in 0..30 {
             sim.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
             sim.update(0.1, 80, 40);
-            // ピラニアの捕食は即消滅させず出血した死骸として残すようになったため、
-            // 「捕食が成立した」= 獲物が死亡フラグ状態になった、で打ち切る。
-            if sim.fish[1].dead {
+            // ピラニアの噛みつきは1発では殺さず段階的に弱らせるため、「捕食(1発目)が
+            // 成立した」= 獲物の被噛みつき回数が増えた、で打ち切る。
+            if sim.fish[1].piranha_bite_count > 0 {
                 break;
             }
         }
 
-        // ピラニアに襲われた獲物は即消滅せず、死骸として水槽に残るはず。
-        assert_eq!(sim.fish.len(), 2, "ピラニアの捕食では獲物は即消滅せず死骸として残るはず");
-        assert!(sim.fish[1].dead, "襲われた獲物は死亡状態になるはず");
+        // 1発目では獲物は死なず、負傷した状態で水槽に残るはず。
+        assert_eq!(sim.fish.len(), 2, "ピラニアの噛みつきでは獲物は即消滅しないはず");
+        assert!(!sim.fish[1].dead, "1発目では死なず負傷にとどまるはず");
+        assert_eq!(sim.fish[1].piranha_bite_count, 1, "1発目で被噛みつき回数が1になるはず");
         assert_eq!(sim.fish[0].species, Species::Piranha, "ピラニアは生きて残るはず");
         assert!(!sim.fish[0].dead, "捕食したピラニア自身は死なないはず");
         assert!(sim.fish[0].hunger > PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0, "捕食で空腹度が回復するはず");
@@ -5793,6 +5834,7 @@ mod tests {
         );
         // 血飛沫は複数粒子を散らす強化演出になったため、1個ではなく
         // BLOOD_PARTICLE_COUNT個出るはず(派手・グロテスクに強化する実機要望対応)。
+        // 噛みつきごとに毎回出るので、1発目でもこの数だけ出る。
         assert_eq!(
             sim.drop_effects.len(),
             BLOOD_PARTICLE_COUNT,
@@ -5800,10 +5842,10 @@ mod tests {
         );
         assert!(sim.drop_effects.iter().all(|e| e.kind == EffectKind::Blood));
         assert!(
-            sim.message.as_deref().unwrap_or("").contains("力尽きた"),
-            "ピラニアの捕食メッセージが表示されるはず"
+            sim.message.as_deref().unwrap_or("").contains("がぶり"),
+            "1発目はがぶりとやられた旨のメッセージが表示されるはず"
         );
-        assert_eq!(sim.fish[0].kill_stage, 1, "捕食するたびにkill_stageが増えるはず");
+        assert_eq!(sim.fish[0].kill_stage, 1, "噛みつくたびにkill_stageが増えるはず");
         // 血の滲み(範囲エフェクト)も捕食位置に1つ出るはず
         assert_eq!(sim.blood_stains.len(), 1, "捕食で血の滲みが1つ出るはず");
         // このtick内で生成後すぐにdt(0.1)分減衰するため、ほぼ満タンのはず
@@ -5820,8 +5862,11 @@ mod tests {
         sim.fish.push(piranha);
         sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 45.0, 20.0));
 
+        // 1発では死なずPIRANHA_BITES_TO_KILL発で死ぬので、クールダウンを毎tick解除して
+        // 連続で噛ませ、死亡まで到達させる。
         for _ in 0..30 {
             sim.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+            sim.fish[0].predation_cooldown = 0.0;
             sim.update(0.1, 80, 40);
             if sim.fish[1].dead {
                 break;
@@ -5877,11 +5922,12 @@ mod tests {
     }
 
     #[test]
-    fn piranha_needs_three_kills_before_truly_full() {
-        // 「食欲もっと旺盛に(3匹食べないと満腹にならない)」対応の回帰テスト。
-        // hungerは1匹食べただけで満腹相当まで回復してしまうが、3匹食べるまでは
-        // 狩りをやめないはず。ただし無限に食べ続けるわけではなく、3匹目でちょうど
-        // 満腹が確定し、4匹目は襲われず残るはず。
+    fn piranha_needs_three_bites_before_truly_full() {
+        // 「食欲もっと旺盛に」対応の回帰テスト。hungerは1発の噛みつきで満腹相当まで
+        // 回復してしまうが、PIRANHA_KILLS_TO_FULL発ぶん噛みつくまでは狩りをやめない
+        // はず。ちょうどそのぶんの噛みつきを終えた時点で満腹が確定し、カウンタが0に戻り、
+        // それ以上は狩らないはず(1発では死なない仕様のため「匹数」ではなく「噛みつき回数」で
+        // 満腹判定していることを確認する)。
         let mut sim = Simulation::new(Rng::new(101));
         let mut piranha = Fish::new(Species::Piranha, Stage::Adult, 40.0, 20.0);
         piranha.hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
@@ -5895,45 +5941,203 @@ mod tests {
             ));
         }
 
+        // 実際に何発噛んだかは「死骸1体=PIRANHA_BITES_TO_KILL発ぶん + 生存個体の被噛みつき回数」で
+        // 数える。噛みつき回数が食欲クォータ(PIRANHA_KILLS_TO_FULL)に達したら打ち切る。
+        let total_bites = |sim: &Simulation| -> u32 {
+            sim.fish
+                .iter()
+                .skip(1)
+                .map(|f| {
+                    if f.dead {
+                        PIRANHA_BITES_TO_KILL as u32
+                    } else {
+                        f.piranha_bite_count as u32
+                    }
+                })
+                .sum()
+        };
+
         for _ in 0..300 {
             sim.fish[0].predation_cooldown = 0.0; // クールダウン明けを即座に再現する
             sim.update(0.1, 80, 40);
-            // ピラニアの捕食は即消滅させず死骸を残すようになったため、「3匹狩り終えた」=
-            // 死骸が3つできた、で打ち切る(以降はhungerの自然減少で4匹目まで狩ってしまう
-            // 前に止め、旧テストが len<=2 で早期打ち切りしていたのと同じ意図を保つ)。
-            if sim.fish.iter().filter(|f| f.dead).count() >= 3 {
+            if total_bites(&sim) >= PIRANHA_KILLS_TO_FULL {
                 break;
             }
         }
 
         assert_eq!(
-            sim.fish.len(),
-            5,
-            "ピラニア+4匹(うち3匹は死骸)が残るはず"
-        );
-        assert_eq!(
-            sim.fish.iter().filter(|f| f.dead).count(),
-            3,
-            "3匹だけが捕食されて死骸になるはず"
-        );
-        assert_eq!(
-            sim.fish
-                .iter()
-                .filter(|f| !f.dead && f.species == Species::Neon)
-                .count(),
-            1,
-            "3匹食べたところで4匹目は襲われず生き残るはず"
+            total_bites(&sim),
+            PIRANHA_KILLS_TO_FULL,
+            "食欲クォータぶん(PIRANHA_KILLS_TO_FULL発)噛んだら満腹になり、それ以上は噛まないはず"
         );
         assert_eq!(sim.fish[0].species, Species::Piranha);
         assert!(!sim.fish[0].dead, "ピラニア自身は生きているはず");
         assert_eq!(
             sim.fish[0].piranha_meals_since_full, 0,
-            "3匹目を食べたタイミングでカウンタはリセットされるはず"
+            "クォータぶん噛んだタイミングでカウンタはリセットされるはず"
         );
         assert!(
             sim.fish[0].hunger >= PIRANHA_HUNT_HUNGER_THRESHOLD,
-            "3匹食べた後は満腹相当になっているはず"
+            "クォータぶん噛んだ後は満腹相当になっているはず"
         );
+    }
+
+    // テスト用: ピラニア(index 0)に獲物(index 1)をちょうど1発だけ噛ませる。獲物を口の
+    // 位置へ置き直し、空腹・クールダウン明けにしてから1tickずつ進め、被噛みつき回数か
+    // 死亡フラグが1段階進んだ時点で返す(1tickの捕食は高々1回のため、確実に1発だけ増える)。
+    fn land_one_piranha_bite(sim: &mut Simulation) {
+        let before_count = sim.fish[1].piranha_bite_count;
+        let before_dead = sim.fish[1].dead;
+        for _ in 0..20 {
+            sim.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+            sim.fish[0].predation_cooldown = 0.0;
+            let (mx, my) = sim.fish[0].mouth_position();
+            sim.fish[1].x = mx;
+            sim.fish[1].y = my;
+            sim.update(0.05, 80, 40);
+            if sim.fish[1].piranha_bite_count != before_count || sim.fish[1].dead != before_dead {
+                return;
+            }
+        }
+        panic!("1発の噛みつきが成立しなかった(テストの前提が壊れている)");
+    }
+
+    #[test]
+    fn piranha_first_bite_wounds_prey_without_killing() {
+        // 1発目の噛みつきは獲物を殺さず、被噛みつき回数を1にするだけのはず。
+        let mut sim = Simulation::new(Rng::new(140));
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, 40.0, 20.0);
+        piranha.hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+        sim.fish.push(piranha);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 45.0, 20.0));
+
+        land_one_piranha_bite(&mut sim);
+
+        assert_eq!(sim.fish[1].piranha_bite_count, 1, "1発目で被噛みつき回数が1になるはず");
+        assert!(!sim.fish[1].dead, "1発目では死なないはず");
+    }
+
+    #[test]
+    fn piranha_second_bite_brings_prey_to_two_still_alive() {
+        // 2発目で被噛みつき回数が2になり、まだ死なないはず。
+        let mut sim = Simulation::new(Rng::new(141));
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, 40.0, 20.0);
+        piranha.hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+        sim.fish.push(piranha);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 45.0, 20.0));
+
+        land_one_piranha_bite(&mut sim);
+        land_one_piranha_bite(&mut sim);
+
+        assert_eq!(sim.fish[1].piranha_bite_count, 2, "2発目で被噛みつき回数が2になるはず");
+        assert!(!sim.fish[1].dead, "2発目でもまだ死なないはず");
+    }
+
+    #[test]
+    fn piranha_third_bite_kills_prey_matching_debug_kill_state() {
+        // PIRANHA_BITES_TO_KILL(3)発目でようやく死亡し、Xキー(debug_kill_random_fish)が
+        // 作る死亡状態(dead=true・dead_timer=0.0)と一致するはず。
+        let mut sim = Simulation::new(Rng::new(142));
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, 40.0, 20.0);
+        piranha.hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+        sim.fish.push(piranha);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 45.0, 20.0));
+
+        for _ in 0..(PIRANHA_BITES_TO_KILL as usize) {
+            land_one_piranha_bite(&mut sim);
+        }
+
+        assert!(sim.fish[1].dead, "3発目で死亡状態になるはず");
+        assert_eq!(
+            sim.fish[1].dead_timer, 0.0,
+            "死亡直後のdead_timerはdebug_kill_random_fishと同じく0.0のはず"
+        );
+
+        // 参考: debug_kill_random_fishが作る死亡状態と同じフィールドになっていることを確認する。
+        let mut sim2 = Simulation::new(Rng::new(142));
+        sim2.fish.push(Fish::new(Species::Neon, Stage::Adult, 45.0, 20.0));
+        sim2.debug_kill_random_fish();
+        assert_eq!(sim.fish[1].dead, sim2.fish[0].dead);
+        assert_eq!(sim.fish[1].dead_timer, sim2.fish[0].dead_timer);
+    }
+
+    #[test]
+    fn piranha_bleeding_effects_fire_on_the_first_and_second_bites_too() {
+        // 血飛沫・血の滲み・水質スパイクは殺した瞬間だけでなく、1発目・2発目の
+        // 噛みつきでも毎回出るはず(死亡を伴わない噛みつきでも演出は同じ)。
+        let mut sim = Simulation::new(Rng::new(143));
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, 40.0, 20.0);
+        piranha.hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+        sim.fish.push(piranha);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 45.0, 20.0));
+
+        // 1発目
+        land_one_piranha_bite(&mut sim);
+        assert_eq!(sim.fish[1].piranha_bite_count, 1);
+        assert!(!sim.fish[1].dead);
+        assert!(sim.pollution > 0.0, "1発目でも水質スパイクが出るはず");
+        assert!(!sim.blood_stains.is_empty(), "1発目でも血の滲みが出るはず");
+        assert!(
+            sim.drop_effects.iter().any(|e| e.kind == EffectKind::Blood),
+            "1発目でも血飛沫パーティクルが出るはず"
+        );
+
+        let pollution_after_first = sim.pollution;
+        let stains_after_first = sim.blood_stains.len();
+
+        // 2発目
+        land_one_piranha_bite(&mut sim);
+        assert_eq!(sim.fish[1].piranha_bite_count, 2);
+        assert!(!sim.fish[1].dead);
+        assert!(
+            sim.pollution > pollution_after_first,
+            "2発目でもさらに水質スパイクが乗るはず"
+        );
+        assert!(
+            sim.blood_stains.len() > stains_after_first,
+            "2発目でも血の滲みが追加されるはず"
+        );
+    }
+
+    #[test]
+    fn piranha_bite_wounds_heal_over_time_without_further_bites() {
+        // これ以上噛まれなければ、被噛みつきはPIRANHA_BITE_RECOVER_INTERVALごとに
+        // 1段階ずつ時間経過で癒えて、最終的に無傷(0)に戻るはず。
+        let mut sim = Simulation::new(Rng::new(150));
+        let mut neon = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
+        neon.hunger = MAX_HUNGER;
+        neon.piranha_bite_count = 2;
+        sim.fish.push(neon);
+
+        // 1インターバル未満ではまだ回復しない(keep_fed=trueで満腹を保ち、餓死・病気を避ける)
+        run(&mut sim, PIRANHA_BITE_RECOVER_INTERVAL - 5.0, 0.5, 80, 40, true);
+        assert_eq!(sim.fish[0].piranha_bite_count, 2, "インターバル未満では回復しないはず");
+
+        // 合計で1インターバルを超えると1段階回復する
+        run(&mut sim, 6.0, 0.5, 80, 40, true);
+        assert_eq!(sim.fish[0].piranha_bite_count, 1, "1インターバルで1段階回復するはず");
+
+        // さらに1インターバルでもう1段階回復して無傷に戻る
+        run(&mut sim, PIRANHA_BITE_RECOVER_INTERVAL + 1.0, 0.5, 80, 40, true);
+        assert_eq!(sim.fish[0].piranha_bite_count, 0, "さらに1インターバルで無傷に戻るはず");
+    }
+
+    #[test]
+    fn wounded_fish_swims_slower_than_an_unwounded_one() {
+        // 被噛みつきが増えるほど遊泳速度倍率(speed_mult)が下がるはず(空腹段階・病気を
+        // そろえて、負傷ぶんだけの差を直接確認する)。
+        let make = |bites: u8| {
+            let mut f = Fish::new(Species::Neon, Stage::Adult, 0.0, 0.0);
+            f.hunger = 50.0; // 全個体で同じ空腹段階にそろえる
+            f.sick = false;
+            f.piranha_bite_count = bites;
+            f
+        };
+        let s0 = make(0).speed_mult();
+        let s1 = make(1).speed_mult();
+        let s2 = make(2).speed_mult();
+        assert!(s1 < s0, "1回噛まれた個体は無傷より遅いはず: s1={s1} s0={s0}");
+        assert!(s2 < s1, "2回噛まれた個体はさらに遅いはず: s2={s2} s1={s1}");
     }
 
     #[test]
@@ -6107,7 +6311,11 @@ mod tests {
         // ほぼ密着しているが、口基準の距離だけでは飛び越えてしまう位置関係。
         sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 4.0, 20.0));
 
+        // 1発では死なずPIRANHA_BITES_TO_KILL発で死ぬので、空腹・クールダウン明けを毎tick維持して
+        // 連続で噛ませ、死亡まで到達させる。
         for _ in 0..50 {
+            sim.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+            sim.fish[0].predation_cooldown = 0.0;
             sim.update(0.1, w, h);
             if sim.fish[1].dead {
                 break;
@@ -6330,7 +6538,16 @@ mod tests {
         // サイズ指標0(成長段階・捕食成長段階ともに0)の小さいピラニア
         sim.fish.push(Fish::new(Species::Piranha, Stage::Adult, mx, my));
 
-        sim.update(0.1, 80, 40);
+        // 1発では死なずPIRANHA_BITES_TO_KILL発で死ぬので、空腹・クールダウン明けを毎tick維持して
+        // 連続で噛ませ、死亡まで到達させる。
+        for _ in 0..50 {
+            sim.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+            sim.fish[0].predation_cooldown = 0.0;
+            sim.update(0.1, 80, 40);
+            if sim.fish[1].dead {
+                break;
+            }
+        }
 
         // ピラニアの捕食(共食い含む)は即消滅させず死骸を残すため、小さい方(index 1)が
         // 死亡状態になり、大きい方(index 0)が生きて残ることを確認する。
@@ -8503,7 +8720,16 @@ mod tests {
         piranha.hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
         sim.fish.push(piranha);
 
-        sim.update(0.1, w, h);
+        // 1発では死なずPIRANHA_BITES_TO_KILL発で死ぬので、空腹・クールダウン明けを毎tick維持して
+        // 連続で噛ませ、死亡まで到達させる。
+        for _ in 0..50 {
+            sim.fish[1].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+            sim.fish[1].predation_cooldown = 0.0;
+            sim.update(0.1, w, h);
+            if sim.fish[0].dead {
+                break;
+            }
+        }
 
         // ピラニアの捕食は即消滅させず死骸を残すため、出ているタコ(index 0)が
         // 死亡状態になったことで「ピラニアの捕食対象になれる」ことを確認する。
@@ -8740,7 +8966,16 @@ mod tests {
             phase: 0.0,
         });
 
-        sim.update(0.1, w, h);
+        // 1発では死なずPIRANHA_BITES_TO_KILL発で死ぬので、空腹・クールダウン明けを毎tick維持して
+        // 連続で噛ませ、死亡まで到達させる。
+        for _ in 0..50 {
+            sim.fish[1].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+            sim.fish[1].predation_cooldown = 0.0;
+            sim.update(0.1, w, h);
+            if sim.fish[0].dead {
+                break;
+            }
+        }
 
         // ピラニアの捕食は即消滅させず死骸を残すため、獲物(index 0)が死亡状態に
         // なったことで「カメオが居ても通常の捕食は普段どおり成立する」ことを確認する。
@@ -9086,7 +9321,16 @@ mod tests {
         piranha.hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
         sim.fish.push(piranha);
 
-        sim.update(0.1, w, h);
+        // 1発では死なずPIRANHA_BITES_TO_KILL発で死ぬので、空腹・クールダウン明けを毎tick維持して
+        // 連続で噛ませ、死亡まで到達させる。
+        for _ in 0..50 {
+            sim.fish[1].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+            sim.fish[1].predation_cooldown = 0.0;
+            sim.update(0.1, w, h);
+            if sim.fish[0].dead {
+                break;
+            }
+        }
 
         // ピラニアの捕食は即消滅させず死骸を残すため、獲物(index 0)が死亡状態に
         // なったことで「隠れ場所が無ければ通常どおり捕食される」ことを確認する。
