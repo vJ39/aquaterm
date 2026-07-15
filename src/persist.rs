@@ -75,6 +75,10 @@ pub struct SavedState {
     // カニの表示ON/OFF。旧セーブにはキーが無いため、既定のtrue(表示)にfallbackする。
     #[serde(default = "default_true")]
     pub crab_toggle: bool,
+    // シミュレーション速度([/]キーで変更するSPEED_STEPSのインデックス)。旧セーブには
+    // キーが無いため、Ctl::new()と同じ既定速度(等倍)にfallbackする。
+    #[serde(default = "default_speed_idx")]
+    pub speed_idx: usize,
 }
 
 fn default_true() -> bool {
@@ -87,6 +91,10 @@ fn default_species_toggle() -> [bool; 5] {
 
 fn default_feed_amount() -> usize {
     crate::sim::FEED_AMOUNT_DEFAULT
+}
+
+fn default_speed_idx() -> usize {
+    crate::SPEED_DEFAULT
 }
 
 // 保存先パス ~/.config/aquaterm/state.json
@@ -138,6 +146,7 @@ pub fn save(sim: &Simulation, ctl: &crate::Ctl) -> std::io::Result<()> {
         feed_amount: sim.feed_amount,
         pollution: sim.pollution,
         crab_toggle: sim.crab_toggle,
+        speed_idx: ctl.speed_idx,
     };
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -169,6 +178,8 @@ pub fn restore_into(sim: &mut Simulation, ctl: &mut crate::Ctl, state: SavedStat
     ctl.day_night_on = state.day_night_on;
     ctl.auto_replenish_on = state.auto_replenish_on;
     ctl.bubble_sfx_on = state.bubble_sfx_on;
+    // SPEED_STEPSの要素数が将来変わっても範囲外インデックスでpanicしないよう頭打ちにする。
+    ctl.speed_idx = state.speed_idx.min(crate::SPEED_STEPS.len() - 1);
 }
 
 #[cfg(test)]
@@ -211,6 +222,7 @@ mod tests {
             feed_amount: 1,
             pollution: 0.0,
             crab_toggle: true,
+            speed_idx: 2,
         };
         let json = serde_json::to_string(&state).expect("シリアライズできるはず");
         let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
@@ -263,6 +275,11 @@ mod tests {
             restored.crab_toggle,
             "旧セーブではcrab_toggleは既定のtrue(表示)にfallbackするはず"
         );
+        assert_eq!(
+            restored.speed_idx,
+            crate::SPEED_DEFAULT,
+            "旧セーブではspeed_idxは既定速度(等倍)にfallbackするはず"
+        );
     }
 
     #[test]
@@ -294,6 +311,7 @@ mod tests {
             feed_amount: 3,
             pollution: 42.5,
             crab_toggle: false,
+            speed_idx: 4,
         };
         let json = serde_json::to_string(&state).expect("シリアライズできるはず");
         let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
@@ -308,6 +326,7 @@ mod tests {
         assert_eq!(restored.feed_amount, 3);
         assert_eq!(restored.pollution, 42.5);
         assert!(!restored.crab_toggle);
+        assert_eq!(restored.speed_idx, 4);
     }
 
     #[test]
@@ -349,6 +368,7 @@ mod tests {
             feed_amount: 1,
             pollution: 0.0,
             crab_toggle: true,
+            speed_idx: 2,
         };
         let json = serde_json::to_string(&state).expect("シリアライズできるはず");
         let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
@@ -387,6 +407,7 @@ mod tests {
             feed_amount: 1,
             pollution: 0.0,
             crab_toggle: true,
+            speed_idx: 2,
         };
         let json = serde_json::to_string(&state).expect("シリアライズできるはず");
         let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
@@ -429,6 +450,7 @@ mod tests {
             feed_amount: 1,
             pollution: 0.0,
             crab_toggle: true,
+            speed_idx: 2,
         };
         let json = serde_json::to_string(&state).expect("シリアライズできるはず");
         let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");

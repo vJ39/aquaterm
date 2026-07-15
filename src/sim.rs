@@ -1408,7 +1408,16 @@ impl Simulation {
 
         for f in &mut self.fish {
             if f.dead {
-                continue; // 死亡演出中の魚は驚かない
+                // 死亡演出中の魚は驚かないが、カーソル近くの死骸は「つついた」扱いに
+                // して、以降は浮力を無視して沈降を早める(既に沈み切った死骸に対しては
+                // 無害な無操作になる)。
+                let dx = f.x - cx;
+                let dy = f.y - cy;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist < KNOCK_RADIUS {
+                    f.sink_forced = true;
+                }
+                continue;
             }
             let dx = f.x - cx;
             let dy = f.y - cy;
@@ -2109,7 +2118,13 @@ impl Simulation {
                 // 縦の移動中・静止中を問わず、ゆらゆらと左右に揺れながら漂う。
                 let f = &mut self.fish[i];
                 let bottom_y = safe_upper(sand_top - 1.0);
-                let buoyancy = CORPSE_BUOYANCY_INITIAL * (-f.dead_timer / CORPSE_BUOYANCY_DECAY_TAU).exp();
+                // カーソル近くで叩かれた(つつかれた)死骸は、以降は浮力を無視して
+                // 重力だけで沈む(つついたらすぐ沈められるようにする要望への対応)。
+                let buoyancy = if f.sink_forced {
+                    0.0
+                } else {
+                    CORPSE_BUOYANCY_INITIAL * (-f.dead_timer / CORPSE_BUOYANCY_DECAY_TAU).exp()
+                };
                 // y は下向きが正のため、浮力優勢(浮上)ならvyは負(減少)方向、
                 // 重力優勢(沈降)ならvyは正(増加)方向に加速する必要がある。
                 let net_accel = CORPSE_GRAVITY_ACCEL - buoyancy; // 正なら沈降側、負なら浮上側に加速
@@ -6332,6 +6347,65 @@ mod tests {
         assert!(
             (sim.fish[0].x - start_x).abs() <= DEAD_SWAY_AMPLITUDE + 0.5,
             "左右にはゆらゆらと揺れる程度で、大きくは横移動しないはず"
+        );
+    }
+
+    #[test]
+    fn knocking_near_a_floating_corpse_forces_it_to_sink() {
+        // 浮いている死骸をカーソル近くで叩く(つつく)と、以降は浮力を無視して
+        // 重力だけで沈み始める要望への回帰テスト。叩かなかった場合と比べて、
+        // 同じ時間経過後により深く(yが大きく)沈んでいるはず。
+        let (w, h) = (80, 40);
+        let make_sim = |knocked: bool| {
+            let mut sim = Simulation::new(Rng::new(4290));
+            let mut fish = Fish::new(Species::Goldfish, Stage::Adult, 20.0, 30.0);
+            fish.dead = true;
+            fish.dead_timer = 0.0; // 浮力がまだ強い直後
+            sim.fish.push(fish);
+            if knocked {
+                sim.knock(20.0, 30.0, w, h);
+            }
+            sim
+        };
+        let mut knocked = make_sim(true);
+        let mut not_knocked = make_sim(false);
+        assert!(knocked.fish[0].sink_forced, "叩いた死骸にはsink_forcedが立つはず");
+        assert!(!not_knocked.fish[0].sink_forced);
+
+        for _ in 0..30 {
+            knocked.update(0.1, w, h);
+            not_knocked.update(0.1, w, h);
+        }
+        assert!(
+            knocked.fish[0].y > not_knocked.fish[0].y,
+            "叩いた死骸は叩いていない死骸より早く沈んでいるはず(knocked.y={} not_knocked.y={})",
+            knocked.fish[0].y,
+            not_knocked.fish[0].y
+        );
+    }
+
+    #[test]
+    fn knocking_a_settled_corpse_is_a_harmless_no_op() {
+        // 既に水底に沈み切った死骸を叩いてもsink_forcedは立つが、位置には影響しない
+        // (既に沈んでいるため無害な無操作になる)ことの回帰テスト。
+        let (w, h) = (80, 40);
+        let sand_top = h as f64 - sand_height(h) as f64;
+        let mut sim = Simulation::new(Rng::new(4291));
+        let mut fish = Fish::new(Species::Goldfish, Stage::Adult, 20.0, sand_top - 1.0);
+        fish.dead = true;
+        fish.dead_timer = CORPSE_REMOVE_TIME / 2.0; // 十分に沈み切っている想定
+        sim.fish.push(fish);
+        let y_before = sim.fish[0].y;
+
+        sim.knock(20.0, sand_top - 1.0, w, h);
+        assert!(sim.fish[0].sink_forced);
+
+        for _ in 0..30 {
+            sim.update(0.1, w, h);
+        }
+        assert!(
+            (sim.fish[0].y - y_before).abs() < 0.5,
+            "沈み切った死骸を叩いても位置はほぼ変わらないはず"
         );
     }
 

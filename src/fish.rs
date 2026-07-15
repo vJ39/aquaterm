@@ -164,6 +164,10 @@ pub struct Fish {
     // 一度でもつがいの交尾が成立したことがあるかどうか(老齢確定産卵の対象を絞るのに使う)
     #[serde(default)]
     pub has_mated: bool,
+    // カーソル近くで叩かれた(つつかれた)死骸かどうか。trueになると浮力を無視して
+    // 沈降するだけになる(浮遊時間を待たず、つついてすぐ沈められるようにする要望への対応)。
+    #[serde(default)]
+    pub sink_forced: bool,
     // ランダムな瞬発ダッシュ(特定のトリガーが無い通常時の躍動感演出)の残り時間
     #[serde(default)]
     pub dash_timer: f64,
@@ -274,6 +278,7 @@ impl Fish {
             age: 0.0,
             elderly_spawned: false,
             has_mated: false,
+            sink_forced: false,
             dash_timer: 0.0,
             dash_dx: 0.0,
             dash_dy: 0.0,
