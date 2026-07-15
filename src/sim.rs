@@ -2054,12 +2054,18 @@ impl Simulation {
         self.fish.push(fish);
     }
 
-    // 間引き: 通常の魚(ピラニア含む)がいればそれを1匹減らす。通常の魚が0匹になったら
-    // カニを1匹減らす(観賞用生物だけ残って「0にしたのに何か残ってる」と
-    // 分かりづらくならないようにするフォールバック)。追加(add_fish)は通常魚のみのまま。
+    // 間引き: 生きている魚(通常魚・ピラニア含む)がいればそれを1匹減らす。生きている
+    // 魚が0匹になったらカニを1匹減らす(観賞用生物だけ残って「0にしたのに何か
+    // 残ってる」と分かりづらくならないようにするフォールバック)。追加(add_fish)は
+    // 通常魚のみのまま。
+    //
+    // 生きている魚の有無で判定する(self.fish.is_empty()ではない)。fish配列には
+    // 死亡演出中の死骸も残るため、以前は「死骸だけの水槽」でも「魚がいる」扱いに
+    // なり、`-`を押すと死骸を1体popしてしまっていた(クジラ大爆発で水槽内が
+    // 死骸だけになる状況が新たに生まれたため、この既存の不具合が顕在化した)。
     pub fn remove_fish(&mut self) {
-        if !self.fish.is_empty() {
-            self.fish.pop();
+        if let Some(idx) = self.fish.iter().rposition(|f| !f.dead) {
+            self.fish.remove(idx);
             // 実機フィードバック対応: タコが通常のfish扱いで間引かれて0匹になった
             // ときに、対応するタコつぼ(dens)だけが空のまま取り残されると不自然
             // なので、一緒に消す。
@@ -9677,6 +9683,32 @@ mod tests {
         sim.remove_fish();
         assert_eq!(sim.fish.len(), 0);
         assert_eq!(sim.crabs.len(), 0);
+    }
+
+    #[test]
+    fn remove_fish_falls_back_to_crabs_when_only_corpses_remain() {
+        // クジラ大爆発等で水槽内が死骸だけになった場合、fish配列自体は空ではない
+        // (死骸が残っている)が、生きている魚は0匹のはず。この場合も「魚がいない」
+        // 扱いでカニ側にフォールバックするべきで、死骸を誤ってpopしてはいけない
+        // (以前はself.fish.is_empty()で判定していたため、死骸を1体popしてしまう
+        // 不具合があった)。
+        let mut sim = Simulation::new(Rng::new(91));
+        let mut corpse = Fish::new(Species::Neon, Stage::Adult, 10.0, 10.0);
+        corpse.dead = true;
+        corpse.dead_timer = 900.0;
+        sim.fish.push(corpse);
+        sim.crabs.push(Crab {
+            x: 10.0,
+            dir: 1.0,
+            pause_timer: 0.0,
+            facing_right: true,
+        });
+
+        sim.remove_fish();
+
+        assert_eq!(sim.fish.len(), 1, "死骸だけの場合、死骸は間引き対象にしないはず");
+        assert!(sim.fish[0].dead, "残っているのは死骸のままのはず");
+        assert_eq!(sim.crabs.len(), 0, "生きている魚が0匹ならカニが減るはず");
     }
 
     #[test]
