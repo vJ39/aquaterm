@@ -89,6 +89,7 @@ cargo run --release --no-default-features
 | `J` | 水質(pollution)を0とMAXの間でトグルする(デバッグ用) |
 | `X` | 生きている個体からランダムに1匹選んで即座に死亡させる(デバッグ用) |
 | `Z` | スター(無敵アイテム)をカーソル位置に確実に投入する(デバッグ用) |
+| `L` | 生きている個体からランダムに1匹選び、寿命(老衰死)の残りを10秒にする(デバッグ用) |
 
 </details>
 
@@ -143,7 +144,7 @@ sudo apt install libasound2-dev pkg-config
 cargo test
 ```
 
-239 unit tests cover:
+266 unit tests cover:
 
 - 空腹度・成長・病気・繁殖・寿命
 - ピラニア・タコの捕食と逃走行動

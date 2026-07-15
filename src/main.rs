@@ -16,8 +16,8 @@ mod sound;
 
 use color::{
     apply_day_night, apply_murkiness, day_brightness, lerp, scale, vitality_color, water_gradient, Color, CURSOR,
-    AFFINITY_FLAG, CRITICAL_FLAG, DEAD_FLAG, GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP,
-    SICK_FLAG, SICK_TINT, WOUNDED_FLAG,
+    AFFINITY_FLAG, CRITICAL_FLAG, DEAD_FLAG, ELDERLY_FLAG, GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND,
+    SAND_DEEP, SICK_FLAG, SICK_TINT, WOUNDED_FLAG,
 };
 use chrono::{Local, Timelike};
 use crossterm::{
@@ -547,6 +547,8 @@ fn handle_key(
         KeyCode::Char('X') => sim.debug_kill_random_fish(),
         // デバッグ用: スター(無敵アイテム)をカーソル位置に確実に投入する
         KeyCode::Char('Z') => sim.debug_spawn_star(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
+        // デバッグ用: 生きている個体からランダムに1匹選んで寿命(老衰死)の残りを10秒にする
+        KeyCode::Char('L') => sim.debug_age_random_fish_near_death(),
         KeyCode::Char(',') => {
             ctl.settings_on = true;
             ctl.settings_selected = 0;
@@ -1004,7 +1006,17 @@ fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usi
     } else if f.piranha_bite_count == 1 {
         put(fb, f.x + half + 3.0, meter_y, WOUNDED_FLAG, w, h);
     }
+    // 寿命間近フラグ: 負傷フラグのさらに右に、老衰死までの残り時間が短い個体だけ表示する
+    // (Lキーのデバッグショートカット等で寿命を詰めた個体がひと目で分かるようにする)。
+    let remaining_lifespan = sim::LIFESPAN_DEATH_AGE * f.lifespan_mult - f.age;
+    if remaining_lifespan <= ELDERLY_WARNING_SECS {
+        put(fb, f.x + half + 4.0, meter_y, ELDERLY_FLAG, w, h);
+    }
 }
+
+// 寿命間近フラグを表示する残り時間のしきい値。Lキー(debug_age_random_fish_near_death)が
+// 残り10秒に設定するので、少し余裕を持たせてすぐ確認できるようにする。
+const ELDERLY_WARNING_SECS: f64 = 15.0;
 
 // 投下エフェクト(餌/薬を投げた瞬間の光/波紋)を描く。中心の一瞬の光→広がるリングの順で、
 // 1秒未満で消える。餌と薬で色を変え、何をどこに投げたか一目でわかるようにする。
@@ -1669,7 +1681,7 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
         "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / D タコつぼ / P 水草",
         "          H 全員空腹に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
-        "          J 水質トグル / X ランダム死亡 / Z スター投入(いずれもデバッグ)",
+        "          J 水質トグル / X ランダム死亡 / Z スター投入 / L 寿命残り10秒(いずれもデバッグ)",
         "",
     ];
     // 図鑑が狭い端末で収まらない場合のテキストのみフォールバック行
