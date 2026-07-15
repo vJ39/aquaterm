@@ -641,6 +641,13 @@ pub const AUTO_FEED_COOLDOWN: f64 = 30.0;
 pub const AUTO_FEED_FLOAT_THRESHOLD: usize = 3; // 漂っている(未着地の)餌がこれ未満なら投下対象
 pub const AUTO_MEDICATE_COOLDOWN: f64 = 30.0;
 pub const AUTO_MEDICATE_FLOAT_THRESHOLD: usize = 3;
+// 自動餌やり・自動投薬は、実際に空腹/病気な個体数から乖離した固定量(旧: 常に3〜5粒)
+// になっていたとの指摘への対応。餌1粒はFEED_AMOUNT(34)回復しHUNGRY_THRESHOLD(50)を
+// 十分越えられるので「空腹な個体数=必要な餌の数」、薬1粒は病気1匹をちょうど治すので
+// 「病気の個体数=必要な薬の数」として計算する。ただし水質悪化・処理落ちを防ぐため
+// 上限で頭打ちにする。
+pub const AUTO_FEED_COUNT_CAP: usize = 12;
+pub const AUTO_MEDICATE_COUNT_CAP: usize = 8;
 // 自動ガラス叩き: ランダムな位置・タイミングで時々発生させる(頻度は低め・数分に1回程度)。
 // 既存の「叩きすぎペナルティ」判定にも通常のtキーと同じくカウントされるが、
 // 低頻度なので基本的にペナルティには引っかからない想定。
@@ -1511,6 +1518,13 @@ impl Simulation {
     // 投下位置には一瞬だけ光/波紋の演出(DropEffect)を出し、何をどこに投げたか分かりやすくする。
     pub fn medicate(&mut self, cursor_x: f64, pix_w: usize) {
         let count = self.rng.range_usize(3, 5);
+        self.drop_medicine(cursor_x, pix_w, count);
+    }
+
+    // 投薬の本体。自動投薬(`update_auto_care`)は実際に病気の個体数に合わせた量を
+    // 渡すため、量を引数で受け取る形に分離している(薬1粒で病気1匹をちょうど治せる
+    // ので、病気の個体数と同じ量を投下すれば過不足なく対応できる)。
+    fn drop_medicine(&mut self, cursor_x: f64, pix_w: usize, count: usize) {
         let cx = cursor_x.clamp(1.0, safe_upper(pix_w as f64 - 1.0));
         for _ in 0..count {
             self.medicine.push(Medicine {
@@ -1686,28 +1700,29 @@ impl Simulation {
         self.auto_knock_timer = (self.auto_knock_timer - dt).max(0.0);
 
         if self.auto_feed_timer <= 0.0 {
-            let hungry_exists = self
-                .fish
-                .iter()
-                .any(|f| !f.dead && f.hunger < HUNGRY_THRESHOLD);
+            let hungry_count = self.fish.iter().filter(|f| !f.dead && f.hunger < HUNGRY_THRESHOLD).count();
             let floating_food = self.food.iter().filter(|fd| !fd.landed).count();
-            if hungry_exists && floating_food < AUTO_FEED_FLOAT_THRESHOLD {
+            if hungry_count > 0 && floating_food < AUTO_FEED_FLOAT_THRESHOLD {
                 let x = self.rng.range(4.0, safe_upper(pix_w as f64 - 4.0));
-                // 自動餌やりは`feed_amount`設定の影響を受けず、常に従来どおりの
-                // 控えめな量(3〜5粒・散らばり±6px)に固定する(大量投入すると
-                // 水質が悪化しすぎるため、自動モードの量は手動投下と分離している)。
-                let count = self.rng.range_usize(3, 5);
+                // 自動餌やりは`feed_amount`設定の影響を受けず、実際に空腹な個体数に
+                // 合わせた量(1匹あたり1粒。水質悪化を防ぐため上限で頭打ち)にする
+                // (大量投入すると水質が悪化しすぎるため、自動モードの量は手動投下と
+                // 分離している)。散らばりは従来どおり±6px。
+                let count = hungry_count.min(AUTO_FEED_COUNT_CAP);
                 self.drop_food(x, pix_w, count, 6.0);
                 self.auto_feed_timer = AUTO_FEED_COOLDOWN;
             }
         }
 
         if self.auto_medicate_timer <= 0.0 {
-            let sick_exists = self.fish.iter().any(|f| !f.dead && f.sick);
+            let sick_count = self.fish.iter().filter(|f| !f.dead && f.sick).count();
             let floating_med = self.medicine.iter().filter(|md| !md.landed).count();
-            if sick_exists && floating_med < AUTO_MEDICATE_FLOAT_THRESHOLD {
+            if sick_count > 0 && floating_med < AUTO_MEDICATE_FLOAT_THRESHOLD {
                 let x = self.rng.range(4.0, safe_upper(pix_w as f64 - 4.0));
-                self.medicate(x, pix_w);
+                // 薬1粒は病気1匹をちょうど治すので、病気の個体数に合わせた量にする
+                // (水質悪化・処理落ちを防ぐため上限で頭打ち)。
+                let count = sick_count.min(AUTO_MEDICATE_COUNT_CAP);
+                self.drop_medicine(x, pix_w, count);
                 self.auto_medicate_timer = AUTO_MEDICATE_COOLDOWN;
             }
         }
@@ -6142,21 +6157,53 @@ mod tests {
     }
 
     #[test]
-    fn auto_care_ignores_feed_amount_setting_even_at_max_level() {
+    fn auto_feed_count_matches_hungry_count_and_ignores_feed_amount_setting() {
         // 自動餌やりを`feed_amount`設定と分離した回帰テスト。手動投下量をMAXにしても、
-        // 自動餌やりは常に控えめな3〜5粒のまま(水質が悪化しすぎないようにするため)。
+        // 自動餌やりの量はfeed_amount(MAXなら250〜350粒相当)ではなく、実際に空腹な
+        // 個体数(この場合4匹)に一致するはず(水質が悪化しすぎないようにするため)。
         let mut sim = Simulation::new(Rng::new(403));
         sim.feed_amount = FEED_AMOUNT_LEVELS - 1;
-        let mut f = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
-        f.hunger = 5.0;
-        sim.fish.push(f);
+        for i in 0..4 {
+            let mut f = Fish::new(Species::Neon, Stage::Adult, 40.0 + i as f64, 20.0);
+            f.hunger = 5.0;
+            sim.fish.push(f);
+        }
 
         sim.update_auto_care(0.1, 80, 40);
 
-        assert!(
-            (3..=5).contains(&sim.food.len()),
-            "feed_amountがMAXでも自動餌やりは3〜5粒のはず(実際: {})",
+        assert_eq!(
+            sim.food.len(),
+            4,
+            "自動餌やりの量は空腹な個体数(4匹)に一致するはず(実際: {})",
             sim.food.len()
+        );
+    }
+
+    #[test]
+    fn auto_feed_and_medicate_counts_are_capped_for_a_large_neglected_tank() {
+        // 空腹・病気の個体数が非常に多くても、水質悪化・処理落ちを防ぐため
+        // AUTO_FEED_COUNT_CAP/AUTO_MEDICATE_COUNT_CAPで頭打ちになるはず。
+        let mut sim = Simulation::new(Rng::new(404));
+        for i in 0..(AUTO_FEED_COUNT_CAP + 10) {
+            let mut f = Fish::new(Species::Neon, Stage::Adult, 4.0 + i as f64 * 0.5, 20.0);
+            f.hunger = 5.0;
+            f.sick = true;
+            sim.fish.push(f);
+        }
+
+        sim.update_auto_care(0.1, 200, 40);
+
+        assert_eq!(
+            sim.food.len(),
+            AUTO_FEED_COUNT_CAP,
+            "空腹な個体が多くても餌はAUTO_FEED_COUNT_CAPで頭打ちのはず(実際: {})",
+            sim.food.len()
+        );
+        assert_eq!(
+            sim.medicine.len(),
+            AUTO_MEDICATE_COUNT_CAP,
+            "病気の個体が多くても薬はAUTO_MEDICATE_COUNT_CAPで頭打ちのはず(実際: {})",
+            sim.medicine.len()
         );
     }
 
