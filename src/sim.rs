@@ -164,18 +164,28 @@ pub const POLLUTION_FRY_DEATH_CHANCE_PER_SEC: f64 = 1.0 / POLLUTION_FRY_DEATH_ME
 // 誘引ベクトルも止める)。水質最悪でHUNGER_DECAYがこの倍になる。
 pub const POLLUTION_HUNGER_DECAY_MAX_MULT: f64 = 3.0;
 
-// --- 水流(水槽全体に効く1本の力場ベクトル) ---
-// 時間経過でゆっくり向き・強さがサインカーブ状に変化する(1周期CURRENT_PERIOD秒で
-// 左右に振れる)。魚の遊泳・落下中の餌/薬/肉餌・気泡のドリフト・藻の揺れに、小さな
-// 加速度として作用する(見た目だけの演出ではなく実際に位置を動かす)。
-pub const CURRENT_STRENGTH: f64 = 8.0; // 水流の最大の強さ(px/秒²相当の加速度)
-pub const CURRENT_PERIOD: f64 = 300.0; // 向き・強さが一周する周期(秒)。5分でゆっくり左右に振れる
-pub const CURRENT_VERTICAL_RATIO: f64 = 0.15; // 水平成分に対する垂直成分の比率(斜め方向の質感づけ)
-// 水流を可視化する筋(CurrentStreak)の生成間隔・寿命・最低流速。
+// --- 水流(水槽内を回転する渦・トルネード) ---
+// 水槽内をゆっくり周遊する中心点のまわりに、位置に応じて向きが変わる接線方向の
+// 力場を作る。全体を同じ向きに押す1本のベクトルではないため、水槽の場所ごとに
+// 押される向きが異なり、魚が片側の壁際に溜まり続けにくい。魚の遊泳・落下中の
+// 餌/薬/肉餌・気泡のドリフト・藻の揺れに、小さな加速度として作用する(見た目だけの
+// 演出ではなく実際に位置を動かす)。
+pub const CURRENT_STRENGTH: f64 = 8.0; // 渦の接線方向の力の強さ(px/秒²相当の加速度)
+// 渦(トルネード)の中心が水槽内をゆっくり周遊する周期。X/Yで別周期にすることで
+// リサージュ曲線状にゆっくり動き回り、単純な往復にならないようにする。
+pub const CURRENT_CENTER_DRIFT_PERIOD_X: f64 = 240.0;
+pub const CURRENT_CENTER_DRIFT_PERIOD_Y: f64 = 180.0;
+// 中心が水槽の縁ぎりぎりまで寄りすぎないための余白(水槽サイズに対する比率)。
+pub const CURRENT_CENTER_MARGIN_FRAC: f64 = 0.25;
+// 魚自身の遊泳意思(壁の反発・餌への吸引・逃走等)が水流に負けて自由に動けなくなり
+// 壁際に滞留する、との実機フィードバックへの対応。魚への適用だけ半分の強さにし、
+// 魚が遊泳意思で水流に逆らって自由に行き来できるようにする。他の要素
+// (餌・薬・肉餌・気泡・藻の揺れ・水流の筋)は水流の存在感を出すため全力のまま。
+pub const CURRENT_FISH_MULT: f64 = 0.5;
+// 水流を可視化する筋(CurrentStreak)の生成間隔・寿命。
 pub const CURRENT_STREAK_SPAWN_INTERVAL_MIN: f64 = 1.2;
 pub const CURRENT_STREAK_SPAWN_INTERVAL_MAX: f64 = 2.5;
 pub const CURRENT_STREAK_LIFETIME: f64 = 3.5;
-pub const CURRENT_STREAK_MIN_SPEED: f64 = 10.0; // current_vxがほぼ0の瞬間でも視認できる最低速度
 
 // --- 死亡演出パラメータ ---
 // 死んだ魚は、体内のガスによる浮力(時間とともに減衰する)と重力・水の抵抗を
@@ -377,6 +387,11 @@ pub const PIRANHA_BITE_SPEED_MULT: [f64; 3] = [1.0, 0.8, 0.55];
 pub const BLOOD_EFFECT_LIFETIME: f64 = 1.6; // 表示時間(旧0.5秒→1〜2秒程度に延長)
 pub const BLOOD_PARTICLE_COUNT: usize = 10; // 捕食1回あたりに散らす粒子数(旧: 1個のみ)
 pub const BLOOD_SPREAD_RADIUS: f64 = 6.0; // 粒子が散らばる範囲(旧の波紋演出より広め)
+// 負傷中(piranha_bite_count>0)の魚が、噛まれた瞬間の大きな血飛沫とは別に、
+// 治るまでの間ずっと少量の血を滲ませ続けるための演出パラメータ。
+pub const BLEED_TRICKLE_INTERVAL_MIN: f64 = 1.5; // 次の血だまりを出すまでの間隔(秒)の最小
+pub const BLEED_TRICKLE_INTERVAL_MAX: f64 = 3.0; // 同・最大
+pub const BLEED_TRICKLE_PARTICLE_COUNT: usize = 2; // 1回に出す粒子数(噛みつき時のBLOOD_PARTICLE_COUNTより少なめ)
 // 血の滲み(範囲エフェクト): 捕食位置の周辺に赤みが水中に広がる演出。パーティクルより
 // 長く残り、時間とともにゆっくりフェードアウトする(既存の水槽グラデーションに赤を
 // 混ぜて表示するイメージ)。
@@ -717,7 +732,7 @@ pub struct Bubble {
     pub vy: f64,
 }
 
-// 水流を可視化するための短い横線状の筋。水流の向き・強さに応じて水平方向へ流れ、
+// 水流を可視化するための短い横線状の筋。渦の力場に沿って流されて曲線を描き、
 // フェードアウトしながら消える(見た目のみ・育成ロジックには参加しない)。血飛沫・墨・
 // 気泡などと同じ短命の演出なので、保存対象にはしない(再起動時に作り直す)。
 #[derive(Clone, Debug)]
@@ -856,10 +871,10 @@ pub struct Simulation {
     pub sound_events: Vec<SfxEvent>,
     pub rng: Rng,
     pub elapsed: f64,            // 累計経過秒
-    // 水流の力場ベクトル。elapsedから毎tick決まるだけの派生値なので保存しない
+    // 渦の中心座標。elapsedと水槽サイズから毎tick決まるだけの派生値なので保存しない
     // (再起動時はupdate_current()で同じ値が再計算される)。
-    pub current_vx: f64,
-    pub current_vy: f64,
+    pub current_center_x: f64,
+    pub current_center_y: f64,
     pub message: Option<String>, // ステータスバー用の一言
     message_ttl: f64,
     bubble_timer: f64,
@@ -994,8 +1009,8 @@ impl Simulation {
             sound_events: Vec::new(),
             rng,
             elapsed: 0.0,
-            current_vx: 0.0,
-            current_vy: 0.0,
+            current_center_x: 0.0,
+            current_center_y: 0.0,
             message: None,
             message_ttl: 0.0,
             bubble_timer: 0.0,
@@ -1880,11 +1895,11 @@ impl Simulation {
         // sand_top が 0 以下になり得る。水面〜水底の描画領域として最低2px は確保する。
         let sand_top = (pix_h as f64 - sand_height(pix_h) as f64).max(2.0);
 
-        // 水流ベクトルを先に更新する。後続の各update_*が同じtickの
-        // current_vx/current_vyを読んで動きに反映するため、必ず最初に呼ぶ。
+        // 渦の中心を先に更新する。後続の各update_*が同じtickの中心座標を使って
+        // current_at()で位置ごとの力場を求めるため、必ず最初に呼ぶ。
         // (水流の筋の管理update_current_streaksは見た目だけの演出なので、気泡
         // (update_bubbles)と並べて描画系エンティティの更新側でまとめて呼ぶ)。
-        self.update_current();
+        self.update_current(pix_w as f64, pix_h as f64);
         self.update_octopus(dt);
         self.update_courtship(dt);
         self.update_movement(dt, pix_w as f64, sand_top);
@@ -2204,9 +2219,6 @@ impl Simulation {
         let margin: f64 = 4.0;
         let top_margin: f64 = 3.0;
         let wall_push = 70.0;
-        // 水流の力場ベクトル。ループ内で self.fish[i] を可変借用するため、先にローカルへ退避する。
-        let current_vx = self.current_vx;
-        let current_vy = self.current_vy;
         // 水質が悪化していると、捕食者でない通常種は食欲そのものを失い、餌を
         // 探して寄っていかなくなる(空腹度自体は別途update_biology側でより速く
         // 減っていくため、餌を放置すれば結果的に餓死しやすくなる)。
@@ -2772,17 +2784,22 @@ impl Simulation {
             }
             let is_dashing = normal_state && new_dash_timer > 0.0;
 
+            // 水流: 魚の現在位置における渦の力場を求める。self.fish[i]を可変借用する前に
+            // 計算しておく(current_at()は共有借用が要るため、可変借用と重ねられない)。
+            let (current_vx, current_vy) = self.current_at(fx, fy);
+
             let f = &mut self.fish[i];
             f.dash_timer = new_dash_timer;
             f.dash_dx = new_dash_dx;
             f.dash_dy = new_dash_dy;
             f.vx += ax * dt;
             f.vy += ay * dt;
-            // 水流: 水槽全体の力場を、他の遊泳力と同じく小さな加速度として毎tick加算する
+            // 水流: 位置ごとの渦の力場を、他の遊泳力と同じく小さな加速度として毎tick加算する
             // (生きていて隠れていない魚だけ。死骸は独自の浮力/重力計算、隠れ中のタコは
-            // 巣に固定なので、いずれもこの手前でcontinue済みでここには来ない)。
-            f.vx += current_vx * dt;
-            f.vy += current_vy * dt;
+            // 巣に固定なので、いずれもこの手前でcontinue済みでここには来ない)。魚だけは
+            // 壁際に滞留しないようCURRENT_FISH_MULTで半分に弱め、遊泳意思で逆らえるようにする。
+            f.vx += current_vx * CURRENT_FISH_MULT * dt;
+            f.vy += current_vy * CURRENT_FISH_MULT * dt;
             // 慣性(ドラッグ)。逃走中・ダッシュ中・追跡中はドラッグ(ブレーキ)も弱めて
             // 反応を鈍らせない。追跡中も速さが体感できないという指摘への対応:
             // 最高速度のクランプ(PIRANHA_CHASE_SPEED_MULT)だけでは、方向転換や短い追跡の
@@ -2864,16 +2881,19 @@ impl Simulation {
         let landed_snapshot: Vec<f64> = self.food.iter().filter(|fd| fd.landed).map(|fd| fd.x).collect();
         let mut new_landings: Vec<f64> = Vec::new();
 
-        for fd in &mut self.food {
-            if fd.landed {
+        for i in 0..self.food.len() {
+            if self.food[i].landed {
                 continue; // 着地済みは停留(寿命は減らさない)
             }
+            // 沈下中は蛇行に加えて渦の力場の水平成分でも横に流される(着地後は砂の上に
+            // 停留するので効かせない)。self.food[i]を可変借用する前に力場を求める。
+            let (cvx, _) = self.current_at(self.food[i].x, self.food[i].y);
+            let fd = &mut self.food[i];
             fd.y += fd.vy * dt;
             // 螺旋階段のように左右へサラサラと蛇行しながら沈む(単純な直下降にしない)
             fd.sway_phase += SPRINKLE_SWAY_ANGULAR_SPEED * dt;
             fd.x += SPRINKLE_SWAY_AMPLITUDE * SPRINKLE_SWAY_ANGULAR_SPEED * fd.sway_phase.cos() * dt;
-            // 沈下中は蛇行に加えて水流でも横に流される(着地後は砂の上に停留するので効かせない)。
-            fd.x += self.current_vx * dt;
+            fd.x += cvx * dt;
             fd.x = fd.x.clamp(1.0, safe_upper(pix_w as f64 - 1.0));
             fd.life -= dt;
             if fd.y >= sand_top {
@@ -2936,16 +2956,18 @@ impl Simulation {
         let landed_snapshot: Vec<f64> = self.medicine.iter().filter(|md| md.landed).map(|md| md.x).collect();
         let mut new_landings: Vec<f64> = Vec::new();
 
-        for md in &mut self.medicine {
-            if md.landed {
+        for i in 0..self.medicine.len() {
+            if self.medicine[i].landed {
                 continue;
             }
+            // 餌と同様、沈下中だけ渦の力場の水平成分で横に流される。
+            let (cvx, _) = self.current_at(self.medicine[i].x, self.medicine[i].y);
+            let md = &mut self.medicine[i];
             md.y += md.vy * dt;
             // 餌と同様、螺旋階段のように左右へ蛇行しながら沈む
             md.sway_phase += SPRINKLE_SWAY_ANGULAR_SPEED * dt;
             md.x += SPRINKLE_SWAY_AMPLITUDE * SPRINKLE_SWAY_ANGULAR_SPEED * md.sway_phase.cos() * dt;
-            // 餌と同様、沈下中だけ水流で横に流される。
-            md.x += self.current_vx * dt;
+            md.x += cvx * dt;
             md.x = md.x.clamp(1.0, safe_upper(pix_w as f64 - 1.0));
             md.life -= dt;
             if md.y >= sand_top {
@@ -3014,15 +3036,17 @@ impl Simulation {
         let landed_snapshot: Vec<f64> = self.meat.iter().filter(|mt| mt.landed).map(|mt| mt.x).collect();
         let mut new_landings: Vec<f64> = Vec::new();
 
-        for mt in &mut self.meat {
-            if mt.landed {
+        for i in 0..self.meat.len() {
+            if self.meat[i].landed {
                 continue;
             }
+            // 餌・薬と同様、沈下中だけ渦の力場の水平成分で横に流される。
+            let (cvx, _) = self.current_at(self.meat[i].x, self.meat[i].y);
+            let mt = &mut self.meat[i];
             mt.y += mt.vy * dt;
             mt.sway_phase += SPRINKLE_SWAY_ANGULAR_SPEED * dt;
             mt.x += SPRINKLE_SWAY_AMPLITUDE * SPRINKLE_SWAY_ANGULAR_SPEED * mt.sway_phase.cos() * dt;
-            // 餌・薬と同様、沈下中だけ水流で横に流される。
-            mt.x += self.current_vx * dt;
+            mt.x += cvx * dt;
             mt.x = mt.x.clamp(1.0, safe_upper(pix_w as f64 - 1.0));
             mt.life -= dt;
             if mt.y >= sand_top {
@@ -3310,6 +3334,25 @@ impl Simulation {
                 if f.piranha_bite_recover_timer >= PIRANHA_BITE_RECOVER_INTERVAL {
                     f.piranha_bite_count -= 1;
                     f.piranha_bite_recover_timer = 0.0;
+                }
+
+                // 負傷している間は、噛まれた瞬間の大きな血飛沫とは別に、治るまでずっと
+                // 少量の血を滲ませ続ける(負傷が見た目にも継続して分かるようにする)。
+                f.bleed_timer -= dt;
+                if f.bleed_timer <= 0.0 {
+                    f.bleed_timer = self.rng.range(BLEED_TRICKLE_INTERVAL_MIN, BLEED_TRICKLE_INTERVAL_MAX);
+                    for _ in 0..BLEED_TRICKLE_PARTICLE_COUNT {
+                        let px = f.x + self.rng.range(-BLOOD_SPREAD_RADIUS, BLOOD_SPREAD_RADIUS);
+                        let py = f.y + self.rng.range(-BLOOD_SPREAD_RADIUS * 0.6, BLOOD_SPREAD_RADIUS * 0.6);
+                        let particle_life = BLOOD_EFFECT_LIFETIME * self.rng.range(0.6, 1.0);
+                        self.drop_effects.push(DropEffect {
+                            x: px,
+                            y: py,
+                            life: particle_life,
+                            max_life: particle_life,
+                            kind: EffectKind::Blood,
+                        });
+                    }
                 }
             }
 
@@ -3949,44 +3992,64 @@ impl Simulation {
         }
     }
 
-    // 水流ベクトルを経過時間から決める。強さ・向きはサインカーブ状にゆっくり変化し、
-    // CURRENT_PERIOD秒で一周する(左右に振れる)。垂直成分は水平成分の一定比率で、
-    // わずかに斜めの質感を与える。dtは不要(elapsedだけで決まる純粋な派生値)。
-    fn update_current(&mut self) {
-        let phase = self.elapsed * (std::f64::consts::TAU / CURRENT_PERIOD);
-        self.current_vx = CURRENT_STRENGTH * phase.sin();
-        self.current_vy = self.current_vx * CURRENT_VERTICAL_RATIO;
+    // 渦の中心座標を経過時間と水槽サイズから決める。X/Yで別周期のサインカーブに
+    // 沿って動かすことでリサージュ曲線状にゆっくり水槽内を周遊し、単純な往復には
+    // ならない。中心が縁に寄りすぎないようCURRENT_CENTER_MARGIN_FRAC分の余白を残す。
+    // dtは不要(elapsedと水槽サイズだけで決まる純粋な派生値)。
+    fn update_current(&mut self, w: f64, h: f64) {
+        let amp_x = (w / 2.0) * (1.0 - CURRENT_CENTER_MARGIN_FRAC);
+        let amp_y = (h / 2.0) * (1.0 - CURRENT_CENTER_MARGIN_FRAC);
+        let phase_x = self.elapsed * (std::f64::consts::TAU / CURRENT_CENTER_DRIFT_PERIOD_X);
+        let phase_y = self.elapsed * (std::f64::consts::TAU / CURRENT_CENTER_DRIFT_PERIOD_Y)
+            + std::f64::consts::FRAC_PI_2;
+        self.current_center_x = w / 2.0 + amp_x * phase_x.sin();
+        self.current_center_y = h / 2.0 + amp_y * phase_y.sin();
     }
 
-    // 水流を可視化する筋(CurrentStreak)を生成・移動・消去する。上流側の端から一定
-    // 間隔で湧き、下流へ流れながらフェードして消える。current_vxがほぼ0の瞬間でも
-    // 筋が止まって見えないよう、CURRENT_STREAK_MIN_SPEEDを流速の下限にする。
+    // 指定位置における渦の力場ベクトルを返す。中心からの相対位置に垂直な(接線方向の)
+    // 一定の大きさCURRENT_STRENGTHの押しを与えるため、水槽の場所ごとに向きが変わる回転流に
+    // なる。中心とちょうど同じ位置ではdx=dy=0となり、返り値は正確に(0.0, 0.0)になる
+    // (=水流ゼロ。テストの無風基準にこの性質を使う)。
+    pub fn current_at(&self, x: f64, y: f64) -> (f64, f64) {
+        let dx = x - self.current_center_x;
+        let dy = y - self.current_center_y;
+        let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+        let tx = -dy / dist;
+        let ty = dx / dist;
+        (tx * CURRENT_STRENGTH, ty * CURRENT_STRENGTH)
+    }
+
+    // 水流を可視化する筋(CurrentStreak)を生成・移動・消去する。水槽全体のランダムな
+    // 位置に一定間隔で湧き、その場所の渦の力場に流されて曲線を描きながらフェードして
+    // 消える。渦の力場は場所によらず一定の大きさを持つため、筋が止まって見えることはない。
     fn update_current_streaks(&mut self, dt: f64, w: f64, h: f64) {
         self.current_streak_timer -= dt;
         if self.current_streak_timer <= 0.0 {
             self.current_streak_timer = self
                 .current_streak_rng
                 .range(CURRENT_STREAK_SPAWN_INTERVAL_MIN, CURRENT_STREAK_SPAWN_INTERVAL_MAX);
-            // 上流(水流が向かってくる側)の端から生成する。current_vx>=0なら左端から
-            // 右へ、負なら右端から左へ流す。
-            let from_left = self.current_vx >= 0.0;
+            // 気泡と同様、水槽全体のランダムな位置から生成する。
             self.current_streaks.push(CurrentStreak {
-                x: if from_left { 0.0 } else { w },
+                x: self.current_streak_rng.range(2.0, (w - 2.0).max(2.0)),
                 y: self.current_streak_rng.range(4.0, (h - 4.0).max(4.0)),
                 life: CURRENT_STREAK_LIFETIME,
                 max_life: CURRENT_STREAK_LIFETIME,
             });
         }
-        // 流れる向き(current_vxがちょうど0のときは右向きを既定にする)と、下限つきの流速。
-        let dir = if self.current_vx >= 0.0 { 1.0 } else { -1.0 };
-        let speed = self.current_vx.abs().max(CURRENT_STREAK_MIN_SPEED);
-        for s in &mut self.current_streaks {
-            s.x += dir * speed * dt;
+        // 各筋を、その場所の渦の力場ベクトルで流す(複数フレームにわたって渦の中心の
+        // まわりを回る曲線軌道になる)。self.current_at()は共有借用が要るため、可変
+        // 借用と重ならないようインデックスでアクセスする。
+        for i in 0..self.current_streaks.len() {
+            let (cvx, cvy) = self.current_at(self.current_streaks[i].x, self.current_streaks[i].y);
+            let s = &mut self.current_streaks[i];
+            s.x += cvx * dt;
+            s.y += cvy * dt;
             s.life -= dt;
         }
-        // 寿命が尽きたもの・画面の端から流れ去ったものを取り除く(溜め込まない)。
+        // 寿命が尽きたもの・水槽のいずれかの縁から流れ去ったものを取り除く(溜め込まない)。
+        // 筋は縦にも流れるため、上下の境界も判定する。
         self.current_streaks
-            .retain(|s| s.life > 0.0 && s.x >= -4.0 && s.x <= w + 4.0);
+            .retain(|s| s.life > 0.0 && s.x >= -4.0 && s.x <= w + 4.0 && s.y >= -4.0 && s.y <= h + 4.0);
     }
 
     // 気泡: 定期発生して上へ移動
@@ -4006,10 +4069,14 @@ impl Simulation {
             self.bubble_sound_timer = self.rng.range(3.0, 6.0);
             self.sound_events.push(SfxEvent::Bubble);
         }
-        for b in &mut self.bubbles {
+        for i in 0..self.bubbles.len() {
+            // ランダムな横揺れに、その場所の渦の力場の水平成分を重ねる。current_at()と
+            // self.rngはいずれもselfの借用が要るため、可変借用と重ならない順で取り出す。
+            let (cvx, _) = self.current_at(self.bubbles[i].x, self.bubbles[i].y);
+            let jitter = self.rng.signed() * 4.0;
+            let b = &mut self.bubbles[i];
             b.y += b.vy * dt;
-            // ランダムな横揺れに水流のドリフトを重ねる(水流が強いと横に流れて見える)。
-            b.x += (self.rng.signed() * 4.0 + self.current_vx) * dt;
+            b.x += (jitter + cvx) * dt;
         }
         self.bubbles.retain(|b| b.y > 1.0);
         if self.bubbles.len() > 60 {
@@ -6138,6 +6205,41 @@ mod tests {
         let s2 = make(2).speed_mult();
         assert!(s1 < s0, "1回噛まれた個体は無傷より遅いはず: s1={s1} s0={s0}");
         assert!(s2 < s1, "2回噛まれた個体はさらに遅いはず: s2={s2} s1={s1}");
+    }
+
+    #[test]
+    fn wounded_fish_keeps_bleeding_a_little_until_healed() {
+        // 負傷中(piranha_bite_count>0)の間は、噛まれた瞬間の血飛沫とは別に、
+        // 少量の血(EffectKind::Blood)を継続的に滲ませ続けるはず。無傷の個体だけの
+        // 水槽では同じ時間経過でも一切発生しないことと対比して確認する。
+        let (w, h) = (80, 40);
+
+        let mut wounded_sim = Simulation::new(Rng::new(151));
+        let mut wounded = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
+        wounded.hunger = MAX_HUNGER;
+        wounded.piranha_bite_count = 1;
+        wounded_sim.fish.push(wounded);
+
+        let mut healthy_sim = Simulation::new(Rng::new(151));
+        let mut healthy = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
+        healthy.hunger = MAX_HUNGER;
+        healthy_sim.fish.push(healthy);
+
+        let mut saw_bleed = false;
+        for _ in 0..100 {
+            wounded_sim.fish[0].hunger = MAX_HUNGER;
+            healthy_sim.fish[0].hunger = MAX_HUNGER;
+            wounded_sim.update(0.5, w, h);
+            healthy_sim.update(0.5, w, h);
+            if wounded_sim.drop_effects.iter().any(|e| e.kind == EffectKind::Blood) {
+                saw_bleed = true;
+            }
+            assert!(
+                !healthy_sim.drop_effects.iter().any(|e| e.kind == EffectKind::Blood),
+                "無傷の個体だけの水槽では血は出ないはず"
+            );
+        }
+        assert!(saw_bleed, "負傷中は時間経過でいつか少量の血が出るはず");
     }
 
     #[test]
@@ -9997,41 +10099,74 @@ mod tests {
     }
 
     #[test]
-    fn current_vector_varies_over_time_and_stays_within_strength_bound() {
-        // update_current() は経過時間からサインカーブ状に current_vx を決める。
-        // 値が [-CURRENT_STRENGTH, CURRENT_STRENGTH] に収まり、かつ時間で変化することを確認する。
+    fn current_field_is_rotational_uniform_magnitude_and_center_drifts() {
+        // current_at() は渦の中心からの相対位置に垂直な、一定の大きさ(CURRENT_STRENGTH)の
+        // 接線ベクトルを返す。場所によって向きが変わり(回転流)、大きさは位置によらず一定で、
+        // 中心とちょうど同じ位置では正確に(0.0, 0.0)になることを確認する。
         let mut sim = Simulation::new(Rng::new(900));
-        let samples = [
-            0.0,
-            CURRENT_PERIOD * 0.1,
-            CURRENT_PERIOD * 0.25,
-            CURRENT_PERIOD * 0.5,
-            CURRENT_PERIOD * 0.75,
-        ];
-        let mut seen = Vec::new();
-        for &e in &samples {
-            sim.elapsed = e;
-            sim.update_current();
+        sim.current_center_x = 50.0;
+        sim.current_center_y = 20.0;
+
+        // 中心から距離・角度の異なる複数の点で、大きさが常にCURRENT_STRENGTHに一致する。
+        let samples = [(80.0, 20.0), (50.0, 60.0), (10.0, 5.0), (90.0, 55.0), (30.0, 40.0)];
+        for &(x, y) in &samples {
+            let (vx, vy) = sim.current_at(x, y);
+            let mag = (vx * vx + vy * vy).sqrt();
             assert!(
-                sim.current_vx >= -CURRENT_STRENGTH - 1e-9 && sim.current_vx <= CURRENT_STRENGTH + 1e-9,
-                "current_vxは[-CURRENT_STRENGTH, CURRENT_STRENGTH]に収まるはず: {}",
-                sim.current_vx
+                (mag - CURRENT_STRENGTH).abs() < 1e-6,
+                "渦の力場の大きさは位置によらずCURRENT_STRENGTHのはず: ({x},{y}) mag={mag}"
             );
-            seen.push(sim.current_vx);
         }
-        let first = seen[0];
+
+        // 中心から見て角度の異なる2点は、違う向きのベクトルになる(=単純な一様押しではなく回転流)。
+        let (ax, ay) = sim.current_at(80.0, 20.0); // 中心の右
+        let (bx, by) = sim.current_at(50.0, 60.0); // 中心の下
         assert!(
-            seen.iter().any(|&v| (v - first).abs() > 1e-6),
-            "elapsedを変えればcurrent_vxも変化するはず: {seen:?}"
+            (ax - bx).abs() > 1e-6 || (ay - by).abs() > 1e-6,
+            "中心からの角度が違えば力場の向きも違うはず: a=({ax},{ay}) b=({bx},{by})"
+        );
+
+        // 中心とちょうど同じ位置では、水流はぴったりゼロになる(無風基準として使える性質)。
+        let (cx, cy) = sim.current_at(sim.current_center_x, sim.current_center_y);
+        assert_eq!((cx, cy), (0.0, 0.0), "中心では水流はゼロのはず");
+
+        // update_current() は経過時間で中心座標を動かし、余白の範囲内に収まる。
+        let (w, h) = (200.0, 80.0);
+        let amp_x = (w / 2.0) * (1.0 - CURRENT_CENTER_MARGIN_FRAC);
+        let amp_y = (h / 2.0) * (1.0 - CURRENT_CENTER_MARGIN_FRAC);
+        let elapseds = [0.0, 30.0, 90.0, 150.0];
+        let mut centers = Vec::new();
+        for &e in &elapseds {
+            sim.elapsed = e;
+            sim.update_current(w, h);
+            assert!(
+                sim.current_center_x >= w / 2.0 - amp_x - 1e-9
+                    && sim.current_center_x <= w / 2.0 + amp_x + 1e-9,
+                "中心xは余白の範囲内に収まるはず: {}",
+                sim.current_center_x
+            );
+            assert!(
+                sim.current_center_y >= h / 2.0 - amp_y - 1e-9
+                    && sim.current_center_y <= h / 2.0 + amp_y + 1e-9,
+                "中心yは余白の範囲内に収まるはず: {}",
+                sim.current_center_y
+            );
+            centers.push((sim.current_center_x, sim.current_center_y));
+        }
+        let first = centers[0];
+        assert!(
+            centers.iter().any(|&(x, y)| (x - first.0).abs() > 1e-6 || (y - first.1).abs() > 1e-6),
+            "elapsedを変えれば中心座標も変化するはず: {centers:?}"
         );
     }
 
     #[test]
-    fn current_pushes_a_fish_downstream_compared_to_no_current() {
-        // 同一シード・同一手順で、current_vxだけを固定値(強い右向き)にした方と 0.0 の方を
-        // 比較し、水流ありの方が魚の平均x位置が下流(右)側へ寄ることを確認する。update()は
-        // 毎tick先頭でcurrent_vxを再計算してしまうため、水流の効果だけを切り出せるよう
-        // update_movement()を直接呼び、毎tick current_vx を明示的に固定する。
+    fn current_pushes_a_fish_off_course_compared_to_no_current() {
+        // 同一シード・同一手順で、渦の中心を魚から離して置いた(強い水流あり)方と、
+        // 中心を魚のいる位置ぴったりに置いた(水流ゼロ)方を比較し、水流ありの方が魚の
+        // 位置が測れるほどずれることを確認する。update()は毎tick先頭で中心を再計算して
+        // しまうため、水流の効果だけを切り出せるようupdate_movement()を直接呼び、毎tick
+        // 中心を明示的に置き直す。
         let (w, h) = (200usize, 60usize);
         let sand_top = (h as f64 - sand_height(h) as f64).max(2.0);
         let dt = 0.05;
@@ -10048,10 +10183,12 @@ mod tests {
             // 満腹に保ち、餌探索(誘引ベクトル)が動きを乱さないようにする。
             with_current.fish[0].hunger = MAX_HUNGER;
             without_current.fish[0].hunger = MAX_HUNGER;
-            with_current.current_vx = CURRENT_STRENGTH; // 右向きの強い水流
-            with_current.current_vy = 0.0;
-            without_current.current_vx = 0.0;
-            without_current.current_vy = 0.0;
+            // 水流あり: 中心を魚の真上のはるか遠方に固定 → ほぼ一定の左向きの押しになる。
+            with_current.current_center_x = 100.0;
+            with_current.current_center_y = -200.0;
+            // 水流ゼロ: 中心を魚の現在位置ぴったりに置く → その位置ではcurrent_atが(0,0)。
+            without_current.current_center_x = without_current.fish[0].x;
+            without_current.current_center_y = without_current.fish[0].y;
             with_current.update_movement(dt, w as f64, sand_top);
             without_current.update_movement(dt, w as f64, sand_top);
             sum_with += with_current.fish[0].x;
@@ -10060,8 +10197,8 @@ mod tests {
         let avg_with = sum_with / steps as f64;
         let avg_without = sum_without / steps as f64;
         assert!(
-            avg_with > avg_without + 1.0,
-            "右向きの水流がある方が魚の平均x位置は下流(右)側に寄るはず: with={avg_with} without={avg_without}"
+            avg_with < avg_without - 1.0,
+            "上方の中心による左向き水流がある方が魚の平均x位置は左へ寄るはず: with={avg_with} without={avg_without}"
         );
     }
 
@@ -10086,8 +10223,12 @@ mod tests {
         with_current.food.push(falling());
         without_current.food.push(falling());
         for _ in 0..steps {
-            with_current.current_vx = CURRENT_STRENGTH;
-            without_current.current_vx = 0.0;
+            // 水流あり: 中心を餌の真上に固定 → 力場の水平成分が左向きになり横に流される。
+            with_current.current_center_x = 60.0;
+            with_current.current_center_y = 0.0;
+            // 水流ゼロ: 中心を餌の現在位置ぴったりに置く → その位置ではcurrent_atが(0,0)。
+            without_current.current_center_x = without_current.food[0].x;
+            without_current.current_center_y = without_current.food[0].y;
             with_current.update_food(dt, sand_top, w);
             without_current.update_food(dt, sand_top, w);
         }
@@ -10096,8 +10237,8 @@ mod tests {
             "この短時間ではまだ沈下中のはず"
         );
         assert!(
-            with_current.food[0].x > without_current.food[0].x + 0.5,
-            "沈下中の餌は右向き水流で右に流されるはず: with={} without={}",
+            with_current.food[0].x < without_current.food[0].x - 0.5,
+            "沈下中の餌は左向き水流で左に流されるはず: with={} without={}",
             with_current.food[0].x,
             without_current.food[0].x
         );
@@ -10114,12 +10255,45 @@ mod tests {
         });
         let before = landed.food[0].x;
         for _ in 0..steps {
-            landed.current_vx = CURRENT_STRENGTH;
+            landed.current_center_x = 60.0;
+            landed.current_center_y = 0.0;
             landed.update_food(dt, sand_top, w);
         }
         assert_eq!(
             landed.food[0].x, before,
             "着地済みの餌は水流の影響を受けないはず"
+        );
+    }
+
+    #[test]
+    fn current_is_weaker_on_a_fish_than_the_undamped_full_strength() {
+        // 魚への水流だけCURRENT_FISH_MULTで弱められていることを確認する。強い水流の中で
+        // 魚を動かし、実際のx方向の移動量が「力場をそのまま位置に全力で足し込んだ場合の
+        // 予測移動量(current_at(...).0 * dt * steps)」より小さいことを見る。半分の強さ+
+        // 速度への加算+慣性(ドラッグ)のいずれもが移動量を予測より小さくする。
+        let (w, h) = (200usize, 60usize);
+        let sand_top = (h as f64 - sand_height(h) as f64).max(2.0);
+        let dt = 0.05;
+        let steps = 200; // 10秒
+
+        let mut sim = Simulation::new(Rng::new(955));
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 100.0, 30.0));
+        let start_x = sim.fish[0].x;
+        // 中心を魚の真上のはるか遠方に固定 → ほぼ一定の左向きの押し。
+        sim.current_center_x = 100.0;
+        sim.current_center_y = -200.0;
+        let (cvx, _) = sim.current_at(sim.fish[0].x, sim.fish[0].y);
+        for _ in 0..steps {
+            sim.fish[0].hunger = MAX_HUNGER;
+            sim.current_center_x = 100.0;
+            sim.current_center_y = -200.0;
+            sim.update_movement(dt, w as f64, sand_top);
+        }
+        let actual_disp = (sim.fish[0].x - start_x).abs();
+        let undamped_pred = cvx.abs() * dt * steps as f64;
+        assert!(
+            actual_disp < undamped_pred,
+            "魚の実移動量は全力・無減衰の予測より小さいはず(CURRENT_FISH_MULT<1の効果): actual={actual_disp} pred={undamped_pred}"
         );
     }
 

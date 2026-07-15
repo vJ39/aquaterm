@@ -234,6 +234,9 @@ pub struct Fish {
     // 直近の被噛みつきからの経過時間。PIRANHA_BITE_RECOVER_INTERVALごとに1段階回復する。
     #[serde(default)]
     pub piranha_bite_recover_timer: f64,
+    // 負傷中(piranha_bite_count>0)の間、次に少量の血を滲ませるまでの残り時間。
+    #[serde(default)]
+    pub bleed_timer: f64,
     // --- 個体差(全種共通。同じ種でも個体ごとにばらつく) ---
     // 空腹になる速さの倍率(HUNGER_DECAYに乗算)。1.0が標準、大きいほど早く空腹になる。
     // 旧セーブにフィールドが無い場合も1.0(ニュートラル・挙動不変)にする。
@@ -306,6 +309,7 @@ impl Fish {
             piranha_quota_timer: 0.0,
             piranha_bite_count: 0,
             piranha_bite_recover_timer: 0.0,
+            bleed_timer: 0.0,
             hunger_decay_mult: 1.0,
             feed_efficiency_mult: 1.0,
             lifespan_mult: 1.0,

@@ -643,8 +643,9 @@ fn render_tank(
             for seg in 0..blade_segs {
                 let t = seg as f64 / blade_segs as f64; // 0(根元)〜1(先端側)
                 let sway = (sim.elapsed * sim::PLANT_SWAY_FREQ + blade_phase).sin() * t * 2.2;
-                // 揺れに加えて水流方向へ傾ける(先端ほど大きく傾く)。
-                let current_lean = sim.current_vx * PLANT_CURRENT_LEAN_MULT * t;
+                // 揺れに加えて、その場所の渦の力場の水平成分の方向へ傾ける(先端ほど大きく傾く)。
+                let (cvx, _) = sim.current_at(p.x, p.y);
+                let current_lean = cvx * PLANT_CURRENT_LEAN_MULT * t;
                 let bx = p.x + blade_dx + sway + current_lean;
                 let by = p.y - seg as f64;
                 put(fb, bx, by, color, w, h);
