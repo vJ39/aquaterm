@@ -6842,8 +6842,10 @@ mod tests {
             .push(Fish::new(Species::Guppy, Stage::Adult, 41.0, 30.0));
         let mut saw_flash = false;
         // 確率的なイベントを待つテストのため、他の箇所の変更でtickごとの乱数消費数が
-        // 変わってもタイミングがずれにくいよう、十分大きめの試行回数にしてある。
-        for _ in 0..40000 {
+        // 変わってもタイミングがずれにくいよう、十分大きめの試行回数にしてある
+        // (40000では無関係なコード変更(スプライトの静的データ追加等)でも境界を
+        // 越えてしまう実例があったため、さらに余裕を持たせた)。
+        for _ in 0..100000 {
             for f in &mut sim.fish {
                 f.hunger = MAX_HUNGER;
                 f.well_fed_timer = BREED_READY_TIME + 5.0;

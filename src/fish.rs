@@ -425,9 +425,10 @@ impl Fish {
     }
 }
 
-// この成長段階(growth_stage)以降のエンゼルフィッシュ成魚は、低解像度の
-// 拡大ではなく専用の高解像度パターンに切り替える(fish.rs内でのみ使う定数)。
-const ANGELFISH_BIG_ADULT_GROWTH_STAGE: u8 = 2;
+// この成長段階(growth_stage)以降の通常種(COMMON)成魚は、低解像度の
+// 拡大ではなく専用の高解像度パターンに切り替える。全種で同じ段階で
+// 切り替えて見た目の一貫性を保つ(fish.rs内でのみ使う定数)。
+const BIG_ADULT_GROWTH_STAGE: u8 = 2;
 
 // ドットマトリクスのスプライト。原点は左上、facing で左右反転する。
 pub struct Sprite {
@@ -444,6 +445,23 @@ impl Sprite {
         // 新種(エンゼルフィッシュ・ベタ・タコ)も同じ解像度感で追加する。
         let lines: &[&str] = match (species, stage) {
             (Species::Neon, Stage::Fry) => &["..FFF..", ".BBBBB.", "<BBABBE", ".BBBBB.", "..FFF.."],
+            // 成長段階が上がって大きく表示されるほど、低解像度パターンの拡大では
+            // 模様が潰れて間延びする。BIG_ADULT_GROWTH_STAGE以降は、同じ紡錘形の
+            // 構図を一回り高い解像度で描き直した専用パターンに切り替える。魚雷型の
+            // 体・左の尾・右の目はそのままに、水色のアクセント帯を中央2行に太く
+            // 通して見えやすくする。
+            (Species::Neon, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
+                "......FFFFF.......",
+                "...BBBBBBBBBBBB...",
+                "..BBBBBBBBBBBBBB..",
+                "<BBBBBBBBBBBBBBBB.",
+                "<<BBBBAAAAAAABBBBE",
+                "<<BBBBAAAAAAABBBBE",
+                "<BBBBBBBBBBBBBBBB.",
+                "..BBBBBBBBBBBBBB..",
+                "...BBBBBBBBBBBB...",
+                "......FFFFF.......",
+            ],
             (Species::Neon, Stage::Adult) => &[
                 ".....FFF.....",
                 "...BBBBBBB...",
@@ -466,6 +484,24 @@ impl Sprite {
             // 尾びれ(F)を左側にまとまった扇状に配置して尾とわかるようにし、
             // 体(B)は丸みのある卵形のまま、頭側(右・目のある側)は尾側より少し
             // すぼめて前後の区別がつくようにした。
+            // BIG_ADULT_GROWTH_STAGE以降は高解像度の専用パターンに切り替える。
+            // 左に扇状の尾びれ(F)、丸みのある卵形の体(B)、右の目(E)という
+            // 金魚らしいシルエットはそのままに、腹のアクセント(A)を一回り
+            // 大きくして拡大表示でも見えるようにした。
+            (Species::Goldfish, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
+                ".....FFFF............",
+                "...FFFFBBBBBBB.......",
+                "..FFFBBBBBBBBBBB.....",
+                ".FFBBBBBBBBBBBBBBB...",
+                ".FBBBBBBBBBBBBBBBBB..",
+                "FBBBBBBBBAAAAABBBBBE.",
+                "FBBBBBBBBAAAAABBBBBE.",
+                ".FBBBBBBBBBBBBBBBBB..",
+                ".FFBBBBBBBBBBBBBBB...",
+                "..FFFBBBBBBBBBBB.....",
+                "...FFFFBBBBBBB.......",
+                ".....FFFF............",
+            ],
             (Species::Goldfish, Stage::Adult) => &[
                 "......FF........",
                 "....FFBBBB......",
@@ -485,6 +521,23 @@ impl Sprite {
             // 体側のライン(A)がほぼ2ドットしかなく見えづらいとの指摘を受けて、
             // 体高がある行の幅いっぱいに伸ばし、体側を横切るはっきりした
             // 一本のラインとして見えるようにした。
+            // BIG_ADULT_GROWTH_STAGE以降は高解像度の専用パターンに切り替える。
+            // 左に大きく広がる扇状の尾びれ(F)、小さく丸い体(B)、右の目(E)という
+            // グッピーらしいシルエットを保ちつつ、体側を横切るアクセントの
+            // 一本線(A)を広い体高いっぱいに伸ばしてはっきり見せる。
+            (Species::Guppy, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
+                "....FFF.........",
+                "..FFFBBBB.......",
+                ".FFBBBBBBB......",
+                "FFBBBBBBBBB.....",
+                "FBBBBBBBBBBB....",
+                "FBBAAAAAAAAB.E..",
+                "FBBBBBBBBBBB....",
+                "FFBBBBBBBBB.....",
+                ".FFBBBBBBB......",
+                "..FFFBBBB.......",
+                "....FFF.........",
+            ],
             (Species::Guppy, Stage::Adult) => &[
                 "...FF.......",
                 "..FBBBF.....",
@@ -543,37 +596,29 @@ impl Sprite {
             // 3本とも見える)。
             // 成長段階が上がって大きく表示されるほど、この低解像度の模様を
             // 拡大するだけでは間延びしてエンゼルフィッシュらしく見えなくなる
-            // との指摘への対応。一定の成長段階(ANGELFISH_BIG_ADULT_GROWTH_STAGE)
-            // 以降は、同じ縦縞の構図を縦横2倍の解像度で描き直した専用パターンに
-            // 切り替える(単純な引き伸ばしではなく、縞・ヒレの各要素自体を
-            // 2倍の太さ・段数で描くことで拡大後も模様が潰れないようにする)。
-            (Species::Angelfish, Stage::Adult) if growth_stage >= ANGELFISH_BIG_ADULT_GROWTH_STAGE => &[
-                "............FFFF............",
-                "............FFFF............",
-                "..........FFFFFFFF..........",
-                "..........FFFFFFFF..........",
-                "........FFFFBBAAFFFF........",
-                "........FFFFBBAAFFFF........",
-                "......FF..AABBAABB..FF......",
-                "......FF..AABBAABB..FF......",
-                "........BBAABBAABBAA........",
-                "........BBAABBAABBAA........",
-                "......BBBBAABBAABBAABB......",
-                "......BBBBAABBAABBAABB......",
-                "<<....BBBBAABBAABBAABB....EE",
-                "<<....BBBBAABBAABBAABB....EE",
-                "......BBBBAABBAABBAABB......",
-                "......BBBBAABBAABBAABB......",
-                "........BBAABBAABBAA........",
-                "........BBAABBAABBAA........",
-                "......FF..AABBAABB..FF......",
-                "......FF..AABBAABB..FF......",
-                "........FFFFBBAAFFFF........",
-                "........FFFFBBAAFFFF........",
-                "..........FFFFFFFF..........",
-                "..........FFFFFFFF..........",
-                "............FFFF............",
-                "............FFFF............",
+            // との指摘への対応。BIG_ADULT_GROWTH_STAGE以降は、同じ縦縞の構図を
+            // 一回り高い解像度で描き直した専用パターンに切り替える(縞・ヒレの
+            // 要素自体を描き込むことで拡大後も模様が潰れないようにする)。
+            // 解像度は通常パターンの縦横2倍まで上げると基のスプライトごと
+            // 大きくなりすぎるため、通常の1.3倍前後に抑えている。
+            (Species::Angelfish, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
+                "........FF........",
+                ".......FFFF.......",
+                "......FFFFFF......",
+                ".....FFBBABFF.....",
+                "....F.ABBABB.F....",
+                ".....BABBABBA.....",
+                "....BBABBABBAB....",
+                "....BBABBABBAB....",
+                "<<.BBBABBABBABB..E",
+                "....BBABBABBAB....",
+                "....BBABBABBAB....",
+                ".....BABBABBA.....",
+                "....F.ABBABB.F....",
+                ".....FFBBABFF.....",
+                "......FFFFFF......",
+                ".......FFFF.......",
+                "........FF........",
             ],
             (Species::Angelfish, Stage::Adult) => &[
                 "......FF......",
@@ -603,6 +648,23 @@ impl Sprite {
             // 一点だけに絞り、色も紫からベタらしい赤+青の対比に変更した
             // (パレット側のaccentも参照)。周囲のヒレ(F)はそのまま活かし、
             // 「体は小さく、ヒレが大きく優雅に広がる」印象を保つ。
+            // BIG_ADULT_GROWTH_STAGE以降は高解像度の専用パターンに切り替える。
+            // ベタの見どころは大きく優雅に広がるヒレ(F)なので、上下・周囲に
+            // 流れるヒレを一回り大きく描き、体(B)は中庸に、中央のアクセント(A)は
+            // 控えめな一点のまま保つ。左に尾(<)、右に目(E)。
+            (Species::Betta, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
+                ".......FFFFF........",
+                ".....FFFFFFFFF......",
+                "...FFFBBBBBBBBFF....",
+                "..FFBBBBBBBBBBBBFF..",
+                ".FFBBBBBBBBBBBBBBFF.",
+                "<FFBBBBBBAABBBBBBFFE",
+                ".FFBBBBBBBBBBBBBBFF.",
+                "..FFBBBBBBBBBBBBFF..",
+                "...FFFBBBBBBBBFF....",
+                ".....FFFFFFFFF......",
+                "......FFF..FFF......",
+            ],
             (Species::Betta, Stage::Adult) => &[
                 "......FFFF......",
                 "....FBBBBBFF....",
@@ -911,4 +973,37 @@ pub fn jellyfish_sprite() -> Sprite {
             fin: Color::new(0, 0, 0),          // 使わない
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 通常種(COMMON)の成魚は、BIG_ADULT_GROWTH_STAGE以降で専用の高解像度
+    // パターンに切り替わり、基準(growth_stage=0)より一回り大きい描画キャンバスに
+    // なるはず。ただし基のスプライトごと大きくなりすぎないよう、縦横ともに
+    // 2倍未満(通常の1.3〜1.5倍程度)に収めていることも確認する。
+    #[test]
+    fn common_species_switch_to_a_bigger_but_not_oversized_adult_sprite() {
+        for &sp in &Species::COMMON {
+            let mut base = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            base.growth_stage = 0;
+            let base_sprite = base.sprite();
+
+            let mut big = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            big.growth_stage = BIG_ADULT_GROWTH_STAGE;
+            let big_sprite = big.sprite();
+
+            assert!(
+                big_sprite.width > base_sprite.width && big_sprite.height > base_sprite.height,
+                "{sp:?}: 大サイズ成魚は基準より幅・高さともに大きいはず (base={}x{}, big={}x{})",
+                base_sprite.width, base_sprite.height, big_sprite.width, big_sprite.height
+            );
+            assert!(
+                big_sprite.width < base_sprite.width * 2 && big_sprite.height < base_sprite.height * 2,
+                "{sp:?}: 大サイズ成魚は縦横2倍未満に収めるはず (base={}x{}, big={}x{})",
+                base_sprite.width, base_sprite.height, big_sprite.width, big_sprite.height
+            );
+        }
+    }
 }
