@@ -894,9 +894,11 @@ fn render_tank(
         draw_drop_effect(fb, e, w, h);
     }
 
-    // 魚(最前面)。成長段階・ピラニアの捕食段階に応じて render_scale() 倍に拡大して描く
-    // (拡大は最近傍サンプリングでスプライトの見た目をそのまま拡大するだけで、
-    // scale==1.0 のときは従来と全く同じ結果になる)。
+    // 魚(最前面)。成長段階・ピラニアの捕食段階に応じて render_scale() 倍に拡大して描く。
+    // 出力ピクセルごとに逆算する素朴な最近傍サンプリングだと、1.15倍のような
+    // 非整数倍率で列ごとの複製回数が不均一になり輪郭がガタつく(シルエットが
+    // 汚く見える不具合の一因)。元スプライトの各セルを、丸めた境界を持つ連続した
+    // 矩形として展開する方式(draw_fish_sprite_cells)にして輪郭の均一さを保つ。
     for f in &sim.fish {
         if f.hidden {
             // タコつぼに隠れている間は姿が見えない(タコの節を参照)
@@ -920,65 +922,12 @@ fn render_tank(
         let hide_alpha = (1.0 - nearest_cover_dist / sim::ALGAE_HIDE_RADIUS).clamp(0.0, 1.0)
             * sim::ALGAE_HIDE_MIX;
         let sprite = f.sprite();
-        let grid = sprite_dense(&sprite);
         let scale = f.render_scale();
         let out_w = ((sprite.width as f64) * scale).round().max(1.0) as isize;
         let out_h = ((sprite.height as f64) * scale).round().max(1.0) as isize;
         let left = f.x.round() as isize - out_w / 2;
         let top = f.y.round() as isize - out_h / 2;
-        // タコの足のうねうねアニメーション: 頭部(マント)は静止させたまま、足の部分
-        // (スプライト下側)だけを時間経過でサイン波的に左右へオフセットさせて波打つ
-        // ように見せる。足の付け根から先端に向かうほど振れを大きくする。
-        let octopus_leg_start_row = match (f.species, f.stage) {
-            (Species::Octopus, Stage::Adult) => Some(6),
-            (Species::Octopus, Stage::Fry) => Some(4),
-            _ => None,
-        };
-        for oy in 0..out_h {
-            for ox in 0..out_w {
-                let sdx = ((ox as f64) / scale).floor() as usize;
-                let sdy = ((oy as f64) / scale).floor() as usize;
-                let sdx = sdx.min(sprite.width.saturating_sub(1));
-                let sdy = sdy.min(sprite.height.saturating_sub(1));
-                // 進行方向で左右反転・死亡演出中は仰向け(上下反転)。出力側のマス目は
-                // そのままに、参照する元ピクセルを反転させることで同じ見た目にする。
-                let src_dx = if f.facing_right {
-                    sdx
-                } else {
-                    sprite.width - 1 - sdx
-                };
-                let src_dy = if f.dead {
-                    sprite.height - 1 - sdy
-                } else {
-                    sdy
-                };
-                if let Some(base) = grid[src_dy * sprite.width + src_dx] {
-                    let wiggle_dx = match octopus_leg_start_row {
-                        Some(leg_start) if !f.dead && sdy >= leg_start => {
-                            let depth = (sdy - leg_start) as f64 + 1.0; // 先端ほど大きく振れる
-                            let leg_phase = (sdx as f64 / sprite.width.max(1) as f64)
-                                * std::f64::consts::TAU
-                                * 2.0; // 足ごとに位相をずらす
-                            let phase = sim.elapsed * sim::OCTOPUS_LEG_WIGGLE_FREQ + leg_phase;
-                            (phase.sin() * depth * sim::OCTOPUS_LEG_WIGGLE_AMPLITUDE * scale)
-                                .round() as isize
-                        }
-                        _ => 0,
-                    };
-                    let px = left + ox + wiggle_dx;
-                    let py = top + oy;
-                    if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
-                        let mut c = fish_pixel_color(f, src_dx, src_dy, base);
-                        if hide_alpha > 0.0 {
-                            // 藻・水草に隠れている表現: 既にそこに描かれている背景色へ寄せる
-                            let bg = fb.get_pixel(px as usize, py as usize);
-                            c = lerp(c, bg, hide_alpha);
-                        }
-                        fb.set_pixel(px as usize, py as usize, c);
-                    }
-                }
-            }
-        }
+        draw_fish_sprite_cells(fb, f, &sprite, scale, left, top, hide_alpha, sim.elapsed, w, h);
         // ステータスオーバーレイ: スプライト直上(1論理ピクセル上)に腹ペコ/病気フラグと
         // 生命残りゲージをまとめて表示する(v キーでON/OFF)。拡大表示分の高さも
         // 踏まえ、拡大後のスプライト上端(top)基準で描く。
@@ -988,8 +937,87 @@ fn render_tank(
     }
 }
 
+// 元スプライトのインデックス(0..width or 0..height)を、丸め境界を持つ出力側の
+// 連続した区間[start, end)に変換する(端数の丸めが隣とずれても幅0にはしない)。
+fn scaled_cell_bounds(index: usize, scale: f64, output_len: isize) -> (isize, isize) {
+    let start = (index as f64 * scale).round() as isize;
+    let mut end = ((index + 1) as f64 * scale).round() as isize;
+    if end <= start {
+        end = start + 1;
+    }
+    (start.clamp(0, output_len), end.clamp(0, output_len))
+}
+
+// 魚1匹分のスプライトを、各セルごとに連続した矩形として展開して描く。
+// (出力ピクセルごとに元ピクセルを逆引きする最近傍サンプリングだと、非整数倍率で
+// 列ごとの複製回数が不均一になり輪郭がガタつくため、元ピクセル基準で塗る)
+#[allow(clippy::too_many_arguments)]
+fn draw_fish_sprite_cells(
+    fb: &mut FrameBuffer,
+    f: &Fish,
+    sprite: &fish::Sprite,
+    scale: f64,
+    left: isize,
+    top: isize,
+    hide_alpha: f64,
+    elapsed: f64,
+    w: usize,
+    h: usize,
+) {
+    let out_w = ((sprite.width as f64) * scale).round().max(1.0) as isize;
+    let out_h = ((sprite.height as f64) * scale).round().max(1.0) as isize;
+    let octopus_leg_start_row = match (f.species, f.stage) {
+        (Species::Octopus, Stage::Adult) => Some(6),
+        (Species::Octopus, Stage::Fry) => Some(4),
+        _ => None,
+    };
+    for &(src_dx, src_dy, base) in &sprite.pixels {
+        // 進行方向で左右反転・死亡演出中は仰向け(上下反転)。参照する元ピクセルは
+        // そのままに、描画先のマス目を反転させることで同じ見た目にする。
+        let draw_dx = if f.facing_right {
+            src_dx
+        } else {
+            sprite.width - 1 - src_dx
+        };
+        let draw_dy = if f.dead {
+            sprite.height - 1 - src_dy
+        } else {
+            src_dy
+        };
+        let (x0, x1) = scaled_cell_bounds(draw_dx, scale, out_w);
+        let (y0, y1) = scaled_cell_bounds(draw_dy, scale, out_h);
+        let wiggle_dx = match octopus_leg_start_row {
+            Some(leg_start) if !f.dead && src_dy >= leg_start => {
+                let depth = (src_dy - leg_start) as f64 + 1.0; // 先端ほど大きく振れる
+                let leg_phase =
+                    (draw_dx as f64 / sprite.width.max(1) as f64) * std::f64::consts::TAU * 2.0; // 足ごとに位相をずらす
+                let phase = elapsed * sim::OCTOPUS_LEG_WIGGLE_FREQ + leg_phase;
+                (phase.sin() * depth * sim::OCTOPUS_LEG_WIGGLE_AMPLITUDE * scale).round() as isize
+            }
+            _ => 0,
+        };
+        let base_color = fish_pixel_color(f, src_dx, src_dy, base);
+        for oy in y0..y1 {
+            for ox in x0..x1 {
+                let px = left + ox + wiggle_dx;
+                let py = top + oy;
+                if px < 0 || py < 0 || (px as usize) >= w || (py as usize) >= h {
+                    continue;
+                }
+                let mut color = base_color;
+                if hide_alpha > 0.0 {
+                    // 藻・水草に隠れている表現: 既にそこに描かれている背景色へ寄せる
+                    let bg = fb.get_pixel(px as usize, py as usize);
+                    color = lerp(color, bg, hide_alpha);
+                }
+                fb.set_pixel(px as usize, py as usize, color);
+            }
+        }
+    }
+}
+
 // スプライトの疎な pixels リストを、(dy*width+dx) で引ける密な配列に変換する
-// (拡大描画で最近傍サンプリングする際に使う)。透明部分は None。
+// (拡大描画で最近傍サンプリングする際に使う。図鑑・アイコン表示等で利用)。透明部分は None。
 fn sprite_dense(sprite: &fish::Sprite) -> Vec<Option<Color>> {
     let mut grid = vec![None; sprite.width * sprite.height];
     for &(dx, dy, c) in &sprite.pixels {

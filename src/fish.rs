@@ -364,10 +364,10 @@ impl Fish {
         base * sick_mult * wound_mult * octopus_wound_mult
     }
 
-    // 見た目の拡大率(1.0=通常成魚サイズ)。全種共通の成長段階(growth_stage)に、
-    // ピラニアだけは捕食由来の成長段階(kill_stage)がさらに積み重なる。両方に上限があるので
-    // 無限に大きくならない。
-    pub fn render_scale(&self) -> f64 {
+    // 成長・種固有サイズから決まる、本来欲しい見た目上の総倍率。全種共通の
+    // 成長段階(growth_stage)に、ピラニアだけは捕食由来の成長段階(kill_stage)が
+    // さらに積み重なる。両方に上限があるので無限に大きくならない。
+    fn desired_visual_scale(&self) -> f64 {
         let general =
             self.growth_stage.min(GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE) as f64 * GENERAL_GROWTH_SCALE_STEP;
         let kill = if matches!(self.species, Species::Piranha) {
@@ -384,6 +384,32 @@ impl Fish {
             _ => 0.0,
         };
         1.0 + species_bonus + general + kill
+    }
+
+    // growth_stageがBIG_ADULT_GROWTH_STAGEに達すると、通常種はスプライト自体が
+    // 基準(growth_stage=0)より一回り大きい専用パターンに切り替わる。この
+    // キャンバス自体の拡大分を差し引かないと、「もともと大きい絵をさらに
+    // desired_visual_scale倍する」二重拡大になり、非整数倍率の拡大描画と相まって
+    // 輪郭が肥大・ガタつく(画面が汚く見える不具合の主因)。
+    fn intrinsic_sprite_scale(&self) -> f64 {
+        if self.stage == Stage::Fry {
+            return 1.0; // Fryは成長段階でスプライトが切り替わらない
+        }
+        let base = Sprite::for_fish(self.species, self.stage, 0);
+        let selected = Sprite::for_fish(self.species, self.stage, self.growth_stage);
+        if base.width == 0 || base.height == 0 {
+            return 1.0;
+        }
+        let width_ratio = selected.width as f64 / base.width as f64;
+        let height_ratio = selected.height as f64 / base.height as f64;
+        width_ratio.max(height_ratio).max(1.0)
+    }
+
+    // 実際にラスタライズへ渡す拡大率。高解像度スプライトが最初から持っている
+    // 大きさ分を補償し、そこからの不足分だけを追加の拡大でまかなう
+    // (1.0未満にはしない=描いたドットを間引いて潰さない)。
+    pub fn render_scale(&self) -> f64 {
+        (self.desired_visual_scale() / self.intrinsic_sprite_scale()).max(1.0)
     }
 
     // 口(頭部前端)のワールド座標。捕食判定を胴体でなく口にすべきという指摘への対応:
@@ -1033,6 +1059,48 @@ mod tests {
                 "{sp:?}: 大サイズ成魚は縦横2倍未満に収めるはず (base={}x{}, big={}x{})",
                 base_sprite.width, base_sprite.height, big_sprite.width, big_sprite.height
             );
+        }
+    }
+
+    // 高解像度スプライトへの切り替え直後(growth_stage=BIG_ADULT_GROWTH_STAGE)は、
+    // スプライト自体がすでに大きいので、追加の拡大描画はほぼ不要になるはず
+    // (intrinsic_sprite_scaleでの相殺が効いていることの確認)。
+    #[test]
+    fn high_resolution_sprite_is_not_scaled_twice() {
+        for &sp in &Species::COMMON {
+            let mut fish = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            fish.growth_stage = BIG_ADULT_GROWTH_STAGE;
+            assert!(
+                fish.render_scale() <= 1.1,
+                "{sp:?}: 高解像度スプライトへ切り替えた直後は追加拡大をほぼ行わないはず: {}",
+                fish.render_scale()
+            );
+        }
+    }
+
+    // render_scaleは常に1.0以上でなければならない(1.0未満だとドットが間引かれて
+    // スプライトが潰れる)。全種・全成長段階で下回らないことを確認する。
+    #[test]
+    fn render_scale_never_downsamples_any_species() {
+        for sp in [
+            Species::Neon,
+            Species::Goldfish,
+            Species::Guppy,
+            Species::Piranha,
+            Species::Angelfish,
+            Species::Betta,
+            Species::Octopus,
+            Species::Whale,
+        ] {
+            for growth_stage in 0..=GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE {
+                let mut fish = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+                fish.growth_stage = growth_stage;
+                assert!(
+                    fish.render_scale() >= 1.0,
+                    "{sp:?} growth_stage={growth_stage}: render_scaleは1.0を下回ってはいけない: {}",
+                    fish.render_scale()
+                );
+            }
         }
     }
 }
