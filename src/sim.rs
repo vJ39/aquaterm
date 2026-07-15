@@ -397,6 +397,22 @@ pub const PIRANHA_BITE_RECOVER_INTERVAL: f64 = 45.0;
 // 負傷段階に応じた遊泳速度の倍率(弱るほど逃げ足が遅くなり、追加で噛まれやすくなる)。
 // インデックスはpiranha_bite_count(0=無傷)に対応する。
 pub const PIRANHA_BITE_SPEED_MULT: [f64; 3] = [1.0, 0.8, 0.55];
+// タコをかじって弱らせる仕組み(ピラニアの被噛みつきと対になる、役割が逆の仕組み)。
+// かじる側は生きている成魚全体(ピラニアを含む、種を問わない)。5回かじられると死亡する。
+pub const OCTOPUS_BITES_TO_DIE: u8 = 5;
+// かじられてから何もなければ、この間隔(秒)ごとにoctopus_bite_countが1段階ずつ回復する。
+pub const OCTOPUS_BITE_RECOVER_INTERVAL: f64 = 45.0;
+// かじられた段階に応じた遊泳速度の倍率(弱るほど逃げ足が遅くなる)。
+// インデックスはoctopus_bite_count(0=無傷)に対応する。段階が多い(5段階)ぶん
+// ピラニアの3段階よりなだらかに落ちるようにする。
+pub const OCTOPUS_BITE_SPEED_MULT: [f64; 5] = [1.0, 0.85, 0.7, 0.55, 0.4];
+// かじる側(成魚)がタコに近づいてかじりつく距離。
+pub const OCTOPUS_BITE_RADIUS: f64 = 10.0;
+// 近くにいる間、毎秒この確率でかじられる(乱発防止の免疫時間と合わせて頻度を調整する)。
+pub const OCTOPUS_BITE_CHANCE_PER_SEC: f64 = 0.15;
+// 一度かじられたら、この時間はどの魚からも新たなかじり判定を受けない
+// (同時に何匹もいる場合に一瞬で殺されてしまわないようにする猶予)。
+pub const OCTOPUS_BITE_IMMUNITY_TIME: f64 = 3.0;
 // 血飛沫演出: もっと派手・グロテスクに強化してほしいという要望を受けて、
 // 単一の一瞬エフェクトから、複数粒子が散らばって尾を引くように少しずつ消える演出に強化した。
 pub const BLOOD_EFFECT_LIFETIME: f64 = 1.6; // 表示時間(旧0.5秒→1〜2秒程度に延長)
@@ -761,6 +777,10 @@ pub struct PurifyBloom {
     pub y: f64,
     pub life: f64,
     pub max_life: f64,
+    // 拡散(PURIFY_BLOOM_GROWTH_TIME)が完了して、浄化剤の効果(濃度加算)を
+    // 発動済みかどうか。着水した瞬間ではなく、拡散し終わったタイミングで
+    // 効果が始まるようにするためのフラグ。
+    pub activated: bool,
 }
 
 // 効果音(SE)の発火イベント。sim.rs は音の再生方法を知らず、main.rs 側の
@@ -2011,6 +2031,9 @@ impl Simulation {
         // (update_bubbles)と並べて描画系エンティティの更新側でまとめて呼ぶ)。
         self.update_current(pix_w as f64, pix_h as f64);
         self.update_octopus(dt);
+        // 出ているタコを成魚がかじって弱らせる判定。update_octopusの直後に置いて、
+        // このtickの隠れ/出現状態を反映した上で判定する。
+        self.update_octopus_bites(dt);
         self.update_courtship(dt);
         self.update_movement(dt, pix_w as f64, sand_top);
         self.update_food(dt, sand_top, pix_w);
@@ -2268,6 +2291,95 @@ impl Simulation {
         }
     }
 
+    // 出ているタコを、近くにいる生きた成魚(種を問わない=ピラニアも含む)がかじって
+    // 弱らせる仕組み(ピラニアの被噛みつきと対になる、役割が逆の仕組み)。
+    // OCTOPUS_BITES_TO_DIE回かじられると力尽きる。同時に何匹もいても一瞬で殺され
+    // ないよう、一度かじられたらOCTOPUS_BITE_IMMUNITY_TIMEの間は追加のかじり判定を受けない。
+    fn update_octopus_bites(&mut self, dt: f64) {
+        // 生きて出ている(隠れていない)タコのスナップショット(index, x, y, かじられ回数,
+        // 免疫残り時間)。借用の都合で先に集めてから本体を書き換える(このコードベース
+        // 共通のパターン)。
+        let octopuses: Vec<(usize, f64, f64, u8, f64)> = self
+            .fish
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.species == Species::Octopus && !f.dead && !f.hidden)
+            .map(|(i, f)| {
+                (
+                    i,
+                    f.x,
+                    f.y,
+                    f.octopus_bite_count,
+                    f.octopus_bite_immunity_timer,
+                )
+            })
+            .collect();
+
+        for (oi, ox, oy, bite_count, immunity_timer) in octopuses {
+            if immunity_timer <= 0.0 {
+                // 近くに、生きている成魚(種を問わない)がいるか探す。ここはピラニアが
+                // 捕食者ではなく「かじる側」として参加する唯一の仕組みなので、捕食者
+                // だからといって除外しない。
+                let biter_in_range = self.fish.iter().enumerate().any(|(j, f)| {
+                    if j == oi
+                        || f.species == Species::Octopus
+                        || f.dead
+                        || f.stage != Stage::Adult
+                    {
+                        return false;
+                    }
+                    let dx = f.x - ox;
+                    let dy = f.y - oy;
+                    dx * dx + dy * dy <= OCTOPUS_BITE_RADIUS * OCTOPUS_BITE_RADIUS
+                });
+                if biter_in_range && self.rng.next_f64() < OCTOPUS_BITE_CHANCE_PER_SEC * dt {
+                    // かじられた: 回復タイマーをリセットし、免疫時間を立てる。
+                    self.fish[oi].octopus_bite_recover_timer = 0.0;
+                    self.fish[oi].octopus_bite_immunity_timer = OCTOPUS_BITE_IMMUNITY_TIME;
+                    // 何回目のかじられか(増分前の値+1)をメッセージの出し分けに使う。
+                    let bite_number = bite_count + 1;
+                    if bite_count + 1 >= OCTOPUS_BITES_TO_DIE {
+                        // 最後の一かじり: Xキー(debug_kill_random_fish)と同じ死亡状態にする。
+                        // タコつぼの後始末は死因を問わない既存の汎用経路(update_biologyの
+                        // CORPSE_REMOVE_TIME経過時・update_crabsのカニ片付け時)に任せる。
+                        self.fish[oi].dead = true;
+                        self.fish[oi].dead_timer = 0.0;
+                    } else {
+                        self.fish[oi].octopus_bite_count += 1;
+                    }
+                    // 小さな血しぶき(噛みつき捕食時のBLOOD_PARTICLE_COUNTほど派手にしない)。
+                    for _ in 0..BLEED_TRICKLE_PARTICLE_COUNT {
+                        let px = ox + self.rng.range(-BLOOD_SPREAD_RADIUS, BLOOD_SPREAD_RADIUS);
+                        let py =
+                            oy + self.rng.range(-BLOOD_SPREAD_RADIUS * 0.6, BLOOD_SPREAD_RADIUS * 0.6);
+                        let particle_life = BLOOD_EFFECT_LIFETIME * self.rng.range(0.6, 1.0);
+                        self.drop_effects.push(DropEffect {
+                            x: px,
+                            y: py,
+                            life: particle_life,
+                            max_life: particle_life,
+                            kind: EffectKind::Blood,
+                        });
+                    }
+                    self.sound_events.push(SfxEvent::Predation);
+                    // かじられ段階に応じてメッセージを変える。最後の一かじり(死亡)は
+                    // 他の死因と同じ「力尽きた」の言い回しにそろえる。
+                    let msg = if bite_number >= OCTOPUS_BITES_TO_DIE {
+                        "タコが魚にかじられ力尽きた…".to_string()
+                    } else if bite_number == 1 {
+                        "タコが魚にかじられた…".to_string()
+                    } else {
+                        "タコが魚にかじられ弱ってきた…".to_string()
+                    };
+                    self.set_message(msg);
+                }
+            }
+            // かじられたかどうかに関わらず、全タコの免疫時間を進める。
+            self.fish[oi].octopus_bite_immunity_timer =
+                (self.fish[oi].octopus_bite_immunity_timer - dt).max(0.0);
+        }
+    }
+
     // 投下エフェクト(餌/薬を投げた瞬間の光/波紋)の残り時間を減らし、消えたものを取り除く
     fn update_effects(&mut self, dt: f64) {
         for e in &mut self.drop_effects {
@@ -2284,6 +2396,15 @@ impl Simulation {
         self.ink_clouds.retain(|c| c.life > 0.0);
         for b in &mut self.purify_blooms {
             b.life -= dt;
+            // 拡散(PURIFY_BLOOM_GROWTH_TIME)が完了した瞬間に、着水時ではなく
+            // ここで初めて濃度を加算する(見た目の拡散と効果の発動を揃えるため)。
+            // 連投すると1.0を超えて積み上がる(上限なし)。水質浄化・食欲不振・
+            // 老化加速のいずれも濃度に比例するだけの式なので、1.0超でも自然に
+            // 効果が強まる(薄まりきるまでの時間も連投した分だけ長引く)。
+            if !b.activated && b.max_life - b.life >= PURIFY_BLOOM_GROWTH_TIME {
+                b.activated = true;
+                self.purifier_concentration += 1.0;
+            }
         }
         self.purify_blooms.retain(|b| b.life > 0.0);
     }
@@ -2329,8 +2450,8 @@ impl Simulation {
                     f.kill_stage,
                     f.is_invincible(), // 無敵中の魚は誰からも捕食対象・追跡対象にしない
                     self.is_hidden_in_cover(f.x, f.y), // 藻・水草・岩に隠れている魚も同様
-                    f.stage,                           // タコの捕食対象制限(稚魚/成魚)に使う
-                    f.sick,                            // 同上(病気の成魚はタコの対象になる)
+                    f.stage,                           // タコの捕食対象制限(稚魚のみ対象)に使う
+                    f.sick,                            // 病気はタコの捕食対象判定には使わなくなった(引数の並び維持のため渡すのみ)
                 )
             })
             .collect();
@@ -3172,15 +3293,16 @@ impl Simulation {
             // 着水したものは水底に停留させず即座に取り除く。
             self.purifiers.retain(|p| p.y < sand_top);
             for lx in landings {
-                // 連投すると1.0を超えて積み上がる(上限なし)。水質浄化・食欲不振・
-                // 老化加速のいずれも濃度に比例するだけの式なので、1.0超でも自然に
-                // 効果が強まる(薄まりきるまでの時間も連投した分だけ長引く)。
-                self.purifier_concentration += 1.0;
+                // 着水した瞬間はブルーム(拡散演出)を出すだけで、効果(濃度加算)は
+                // まだ発動しない。拡散が完了したタイミングでupdate_effects側が
+                // activatedを立てて初めて濃度に反映する(着水直後に効果が始まると
+                // 見た目と体感がズレるとの指摘への対応)。
                 self.purify_blooms.push(PurifyBloom {
                     x: lx,
                     y: sand_top, // 水底(着水位置)を中心に広がる
                     life: PURIFY_BLOOM_LIFETIME,
                     max_life: PURIFY_BLOOM_LIFETIME,
+                    activated: false,
                 });
                 self.sound_events.push(SfxEvent::Purify);
             }
@@ -3537,6 +3659,16 @@ impl Simulation {
                 }
             }
 
+            // タコがかじられた弱りは、しばらく追加でかじられなければ時間経過で1段階ずつ癒える
+            // (ピラニアの被噛みつき回復と同じ仕組み。死亡演出中の個体はループ冒頭で除外済み)。
+            if f.species == Species::Octopus && f.octopus_bite_count > 0 {
+                f.octopus_bite_recover_timer += dt;
+                if f.octopus_bite_recover_timer >= OCTOPUS_BITE_RECOVER_INTERVAL {
+                    f.octopus_bite_count -= 1;
+                    f.octopus_bite_recover_timer = 0.0;
+                }
+            }
+
             // 病気の発症: 腹ぺこ長期 or 過密で確率的に発症。ガラスを叩きすぎた直後は
             // ストレスにより発症確率が一時的に上がる。
             if !f.sick {
@@ -3609,6 +3741,59 @@ impl Simulation {
                 f.dead = true;
                 f.dead_timer = 0.0;
                 deaths.push(format!("{}の稚魚が水質悪化で力尽きた…", species_name(f.species)));
+            } else if f.species == Species::Octopus && self.purifier_concentration > 1.0 {
+                // 浄化剤を連投して濃度が100%を超えると、劇薬が効きすぎてタコは
+                // 血を吐いて死亡する(過剰投入への強いペナルティ)。
+                f.dead = true;
+                f.dead_timer = 0.0;
+                for _ in 0..BLOOD_PARTICLE_COUNT {
+                    let px = f.x + self.rng.range(-BLOOD_SPREAD_RADIUS, BLOOD_SPREAD_RADIUS);
+                    let py = f.y + self.rng.range(-BLOOD_SPREAD_RADIUS * 0.6, BLOOD_SPREAD_RADIUS * 0.6);
+                    let particle_life = BLOOD_EFFECT_LIFETIME * self.rng.range(0.6, 1.0);
+                    self.drop_effects.push(DropEffect {
+                        x: px,
+                        y: py,
+                        life: particle_life,
+                        max_life: particle_life,
+                        kind: EffectKind::Blood,
+                    });
+                }
+                self.blood_stains.push(BloodStain {
+                    x: f.x,
+                    y: f.y,
+                    life: BLOOD_STAIN_LIFETIME,
+                    max_life: BLOOD_STAIN_LIFETIME,
+                });
+                self.sound_events.push(SfxEvent::Predation);
+                deaths.push("タコが浄化剤の効きすぎで血を吐いて力尽きた…".to_string());
+            } else if f.stage == Stage::Fry && self.purifier_concentration >= 0.5 {
+                // 浄化剤の濃度が50%以上になると、稚魚はピラニアに噛まれた時と
+                // 同規模の大量出血とともに直接死亡する。
+                f.dead = true;
+                f.dead_timer = 0.0;
+                for _ in 0..BLOOD_PARTICLE_COUNT {
+                    let px = f.x + self.rng.range(-BLOOD_SPREAD_RADIUS, BLOOD_SPREAD_RADIUS);
+                    let py = f.y + self.rng.range(-BLOOD_SPREAD_RADIUS * 0.6, BLOOD_SPREAD_RADIUS * 0.6);
+                    let particle_life = BLOOD_EFFECT_LIFETIME * self.rng.range(0.6, 1.0);
+                    self.drop_effects.push(DropEffect {
+                        x: px,
+                        y: py,
+                        life: particle_life,
+                        max_life: particle_life,
+                        kind: EffectKind::Blood,
+                    });
+                }
+                self.blood_stains.push(BloodStain {
+                    x: f.x,
+                    y: f.y,
+                    life: BLOOD_STAIN_LIFETIME,
+                    max_life: BLOOD_STAIN_LIFETIME,
+                });
+                self.sound_events.push(SfxEvent::Predation);
+                deaths.push(format!(
+                    "{}の稚魚が浄化剤で大量出血して力尽きた…",
+                    species_name(f.species)
+                ));
             }
         }
 
@@ -3773,9 +3958,9 @@ impl Simulation {
                     f.kill_stage,
                     f.is_invincible(),
                     self.is_hidden_in_cover(f.x, f.y),
-                    f.hunger, // タコの捕食対象制限(空腹判定)に使う
-                    f.stage,  // 同上(稚魚/成魚)
-                    f.sick,   // 同上(病気の成魚はタコの対象になる)
+                    f.hunger, // 空腹はタコの捕食対象判定には使わなくなった(引数の並び維持のため渡すのみ)
+                    f.stage,  // タコの捕食対象制限(稚魚のみ対象)に使う
+                    f.sick,   // 病気もタコの捕食対象判定には使わなくなった(引数の並び維持のため渡すのみ)
                 )
             })
             .collect();
@@ -4298,8 +4483,10 @@ fn is_excluded_as_prey(
     candidate_growth_stage: u8,
     candidate_kill_stage: u8,
     candidate_stage: Stage,
-    candidate_sick: bool,
-    candidate_hungry: bool,
+    // タコの捕食対象がFry限定になったため、成魚の病気・空腹はもう判定に使わない。
+    // 呼び出し側の引数の並びは変えずに、未使用であることを明示する。
+    _candidate_sick: bool,
+    _candidate_hungry: bool,
 ) -> bool {
     if self_index == candidate_index || candidate_dead {
         return true;
@@ -4328,12 +4515,8 @@ fn is_excluded_as_prey(
     if predator_species == Species::Octopus && candidate_species == Species::Piranha {
         return true; // タコはピラニアを襲わない
     }
-    if predator_species == Species::Octopus
-        && candidate_stage == Stage::Adult
-        && !candidate_sick
-        && !candidate_hungry
-    {
-        return true; // タコは健康(病気でなく)かつ満腹(空腹でない)な成魚を襲わない(稚魚は常時対象)
+    if predator_species == Species::Octopus && candidate_stage == Stage::Adult {
+        return true; // タコは稚魚のみを捕食対象にする(成魚は健康・病気・空腹を問わず対象外)
     }
     if candidate_species == predator_species {
         if predator_species == Species::Piranha {
@@ -5566,8 +5749,9 @@ mod tests {
 
     #[test]
     fn purifier_triggers_effect_and_vanishes_on_landing() {
-        // 浄化剤は水底に着いた瞬間に濃度を立て、着水演出を出し、自身は取り除かれるはず
-        // (Food/Medicine/Meatのように水底へ停留しない)。
+        // 浄化剤は水底に着いた瞬間に着水演出(ブルーム)を出して自身は取り除かれるが
+        // (Food/Medicine/Meatのように水底へ停留しない)、効果(濃度加算)はまだ発動しない。
+        // 拡散(PURIFY_BLOOM_GROWTH_TIME)が完了して初めて濃度が立つはず。
         let (w, h) = (80, 40);
         let mut sim = Simulation::new(Rng::new(72));
         sim.drop_purifier(40.0, w);
@@ -5581,13 +5765,21 @@ mod tests {
             }
         }
         assert!(landed, "浄化剤は水底に着けば取り除かれるはず(堆積しない)");
-        // 着水直後は最大(1.0)。同tickの希釈でごくわずかに下がるため、ほぼ1.0を確認する。
+        assert!(!sim.purify_blooms.is_empty(), "着水で浄化ブルームが出るはず");
+        assert_eq!(
+            sim.purifier_concentration, 0.0,
+            "着水した直後はまだ拡散中で、効果はまだ発動していないはず"
+        );
+
+        // 拡散が完了するまで(PURIFY_BLOOM_GROWTH_TIME分+余裕)進めると、濃度が立つ。
+        for _ in 0..((PURIFY_BLOOM_GROWTH_TIME * 2.0 / 0.1) as usize) {
+            sim.update(0.1, w, h);
+        }
         assert!(
-            sim.purifier_concentration > 0.99,
-            "着水で浄化剤の濃度が最大(≈1.0)に立つはず(実際: {})",
+            sim.purifier_concentration > 0.9,
+            "拡散が完了すれば濃度が最大近く(≈1.0)に立つはず(実際: {})",
             sim.purifier_concentration
         );
-        assert!(!sim.purify_blooms.is_empty(), "着水で浄化ブルームが出るはず");
     }
 
     #[test]
@@ -5596,23 +5788,20 @@ mod tests {
         // 積み上がるはず(それに伴い浄化・食欲不振・老化の効果も強まる設計)。
         let (w, h) = (80, 40);
         let mut sim = Simulation::new(Rng::new(74));
+        let settle_ticks = ((PURIFY_BLOOM_GROWTH_TIME * 2.0 / 0.1) as usize).max(500);
+
         sim.drop_purifier(40.0, w);
-        for _ in 0..500 {
+        for _ in 0..settle_ticks {
             sim.update(0.1, w, h);
-            if sim.purifiers.is_empty() {
-                break;
-            }
         }
-        assert!(sim.purifier_concentration > 0.99);
+        assert!(sim.purifier_concentration > 0.9);
+
         sim.drop_purifier(40.0, w);
-        for _ in 0..500 {
+        for _ in 0..settle_ticks {
             sim.update(0.1, w, h);
-            if sim.purifiers.is_empty() {
-                break;
-            }
         }
         assert!(
-            sim.purifier_concentration > 1.9,
+            sim.purifier_concentration > 1.5,
             "連投すると濃度は1.0を超えて積み上がるはず(実際: {})",
             sim.purifier_concentration
         );
@@ -5761,6 +5950,63 @@ mod tests {
                 dosed.fish[0].age
             );
         }
+    }
+
+    #[test]
+    fn octopus_dies_bleeding_when_purifier_concentration_exceeds_one() {
+        // 浄化剤の連投で濃度が100%を超えると、タコは血を吐いて死亡するはず。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(9013));
+        sim.purifier_concentration = 1.01;
+        let mut octopus = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octopus.hidden = false;
+        sim.fish.push(octopus);
+        sim.update(0.1, w, h);
+        assert!(sim.fish[0].dead, "濃度100%超のタコは死亡するはず");
+        assert!(
+            sim.drop_effects.iter().any(|e| e.kind == EffectKind::Blood),
+            "血飛沫が出るはず"
+        );
+        assert!(!sim.blood_stains.is_empty(), "血の滲みが出るはず");
+    }
+
+    #[test]
+    fn octopus_does_not_die_from_purifier_at_exactly_one() {
+        // 100%ちょうど(1.0)ではまだ死なない(「超えたら」なので厳密に1.0より大きい時のみ)。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(9014));
+        sim.purifier_concentration = 1.0;
+        let mut octopus = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octopus.hidden = false;
+        sim.fish.push(octopus);
+        sim.update(0.1, w, h);
+        assert!(!sim.fish[0].dead, "濃度ちょうど100%ではまだ死なないはず");
+    }
+
+    #[test]
+    fn fry_bleeds_and_dies_when_purifier_concentration_reaches_half() {
+        // 浄化剤の濃度が50%以上になると、稚魚はピラニアの捕食と同規模の
+        // 大量出血とともに直接死亡するはず。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(9015));
+        sim.purifier_concentration = 0.5;
+        sim.fish.push(Fish::new(Species::Neon, Stage::Fry, 40.0, 20.0));
+        sim.update(0.1, w, h);
+        assert!(sim.fish[0].dead, "濃度50%以上の稚魚は死亡するはず");
+        assert!(
+            sim.drop_effects.iter().filter(|e| e.kind == EffectKind::Blood).count() >= BLOOD_PARTICLE_COUNT,
+            "ピラニアの捕食と同規模の血飛沫が出るはず"
+        );
+    }
+
+    #[test]
+    fn fry_survives_purifier_below_half_concentration() {
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(9016));
+        sim.purifier_concentration = 0.49;
+        sim.fish.push(Fish::new(Species::Neon, Stage::Fry, 40.0, 20.0));
+        sim.update(0.1, w, h);
+        assert!(!sim.fish[0].dead, "濃度50%未満の稚魚はこの経路では死なないはず");
     }
 
     #[test]
@@ -9922,9 +10168,9 @@ mod tests {
         );
     }
 
-    // タコの捕食対象制限(稚魚は常時・成魚は病気か空腹の時のみ)の判定ロジックを
+    // タコの捕食対象制限(稚魚のみ対象・成魚は状態を問わず対象外)の判定ロジックを
     // 直接呼んで検証する。ピラニア捕食側は無敵バイパスより後・同種判定より前に
-    // 挿入した新ゲートの影響を受けないことも合わせて確認する。
+    // 挿入したゲートの影響を受けないことも合わせて確認する。
     fn octopus_excludes(
         candidate_stage: Stage,
         candidate_sick: bool,
@@ -9964,24 +10210,24 @@ mod tests {
     }
 
     #[test]
-    fn octopus_does_not_target_a_healthy_well_fed_adult() {
-        // 健康(病気でない)かつ満腹(空腹でない)な成魚はタコの捕食対象から外れる。
+    fn octopus_excludes_every_adult_regardless_of_condition() {
+        // 成魚はタコの捕食対象から常に外れる(稚魚のみ対象になったため、病気・空腹を
+        // 問わず成魚は対象外。#37の「病気/空腹の成魚は対象」テストを反転した)。
         assert!(
             octopus_excludes(Stage::Adult, false, false),
             "健康・満腹の成魚はタコの捕食対象から除外されるはず"
         );
-    }
-
-    #[test]
-    fn octopus_targets_a_sick_or_hungry_adult() {
-        // 病気の成魚、または空腹の成魚はタコの捕食対象になる。
         assert!(
-            !octopus_excludes(Stage::Adult, true, false),
-            "病気の成魚はタコの捕食対象になるはず"
+            octopus_excludes(Stage::Adult, true, false),
+            "病気の成魚も稚魚限定化により対象外になるはず"
         );
         assert!(
-            !octopus_excludes(Stage::Adult, false, true),
-            "空腹の成魚はタコの捕食対象になるはず"
+            octopus_excludes(Stage::Adult, false, true),
+            "空腹の成魚も稚魚限定化により対象外になるはず"
+        );
+        assert!(
+            octopus_excludes(Stage::Adult, true, true),
+            "病気かつ空腹の成魚も対象外になるはず"
         );
     }
 
@@ -10040,9 +10286,9 @@ mod tests {
     }
 
     #[test]
-    fn hungry_octopus_eventually_preys_on_a_hungry_adult() {
-        // 対になる統合テスト: 空腹な成魚は同じ状況でタコに捕食される(条件が満たされれば
-        // 通常どおり捕食が成立する)。
+    fn hungry_octopus_leaves_a_hungry_adult_alone_now_that_only_fry_are_prey() {
+        // #37の対テストを反転: 以前は空腹な成魚もタコに捕食されたが、捕食対象が
+        // 稚魚のみに絞られたため、空腹な成魚も襲われず生き残るはず。
         let (w, h) = (80, 40);
         let mut sim = Simulation::new(Rng::new(621));
         let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
@@ -10054,23 +10300,216 @@ mod tests {
         sim.fish.push(octo);
         sim.fish.push(Fish::new(Species::Neon, Stage::Adult, mx, my));
 
-        let mut eaten = false;
         for _ in 0..200 {
             sim.fish[0].hunger = OCTOPUS_HUNT_HUNGER_THRESHOLD - 10.0; // タコは空腹を維持
             sim.fish[0].predation_cooldown = 0.0;
-            if sim.fish.len() > 1 {
-                sim.fish[1].hunger = HUNGRY_THRESHOLD - 1.0; // 獲物は空腹を維持(捕食対象)
-            }
+            sim.fish[1].hunger = HUNGRY_THRESHOLD - 1.0; // 獲物(成魚)は空腹を維持
             sim.update(0.1, w, h);
-            if sim.fish.len() < 2 {
-                eaten = true;
+        }
+
+        // 成魚(index 1)は空腹でも捕食されず生き残るはず(タコが逆に成魚にかじられて
+        // 弱る/死ぬことはあり得るが、それは成魚の生存とは別事象)。
+        assert!(
+            sim.fish.iter().any(|f| f.species == Species::Neon && !f.dead),
+            "空腹な成魚も稚魚限定化により襲われず生き残るはず"
+        );
+    }
+
+    // テスト用: 出ているタコ(index 0)の隣に生きた成魚(index 1)を置き、確率的な
+    // かじり判定が1回成立するまで1tickずつ進める。連打防止の免疫時間は毎tick0に戻して
+    // 確実に判定に到達させ、成魚は満腹・位置を維持して圏内・生存にとどめる。
+    // octopus_bite_countの増加か死亡フラグの変化を検知した時点で返す。
+    fn land_one_octopus_bite(sim: &mut Simulation) {
+        let before_count = sim.fish[0].octopus_bite_count;
+        let before_dead = sim.fish[0].dead;
+        // 確率イベントを待つため試行回数は十分大きめにしてある(spawn_flashのテストと
+        // 同様に、無関係なコード変更でtickごとの乱数消費数が変わってもタイミングが
+        // ずれにくいよう余裕を持たせている)。
+        for _ in 0..100000 {
+            sim.fish[0].hidden = false;
+            sim.fish[0].hidden_timer = 999.0;
+            sim.fish[0].octopus_bite_immunity_timer = 0.0; // 連打防止をバイパスして判定に到達させる
+            sim.fish[0].hunger = MAX_HUNGER;
+            sim.fish[1].hunger = MAX_HUNGER; // かじる側を満腹に保つ(捕食モードに入らせない・餓死させない)
+            sim.fish[1].x = sim.fish[0].x;
+            sim.fish[1].y = sim.fish[0].y;
+            sim.update(0.1, 80, 40);
+            if sim.fish[0].octopus_bite_count != before_count || sim.fish[0].dead != before_dead {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn an_adult_fish_near_an_emerged_octopus_can_bite_it() {
+        // 出ている(隠れていない)タコの近くに生きた成魚がいると、確率的にかじられて
+        // octopus_bite_countが上がる。まず1回かじられて1になることを確認する。
+        let mut sim = Simulation::new(Rng::new(660));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        sim.fish.push(octo);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0));
+
+        land_one_octopus_bite(&mut sim);
+        assert_eq!(
+            sim.fish[0].octopus_bite_count, 1,
+            "近くの成魚に1回かじられてoctopus_bite_countが1になるはず"
+        );
+        assert!(!sim.fish[0].dead, "1回かじられただけでは死なないはず");
+    }
+
+    #[test]
+    fn a_piranha_adult_can_also_bite_an_emerged_octopus() {
+        // ピラニアも「かじる側」として参加できる(この仕組みだけはピラニアが捕食者
+        // ではなくかじる側になる)。満腹に保って捕食モードに入らせず、かじりのみで
+        // タコが弱ることを確認する。
+        let mut sim = Simulation::new(Rng::new(661));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        // すぐ近くにピラニアがいると墨→緊急脱出が絡むので、墨はクールダウン中にしておく。
+        octo.ink_cooldown = 999.0;
+        sim.fish.push(octo);
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, 40.0, 20.0);
+        piranha.hunger = MAX_HUNGER; // 満腹で狩り出さない(かじる側としてのみ参加)
+        sim.fish.push(piranha);
+
+        land_one_octopus_bite(&mut sim);
+        assert!(
+            sim.fish[0].octopus_bite_count >= 1,
+            "満腹のピラニア成魚もかじる側として参加してタコを弱らせられるはず"
+        );
+        assert_eq!(sim.fish[0].species, Species::Octopus, "タコは(かじられただけで)まだ存在するはず");
+    }
+
+    #[test]
+    fn five_octopus_bites_kill_it_matching_debug_kill_state() {
+        // OCTOPUS_BITES_TO_DIE回かじられると死亡する。あと1回で死ぬ段階まで直接進めておき、
+        // 実際のかじり処理(update_octopus_bites)で最後の一かじりを成立させて、死亡した瞬間の
+        // 状態がXキー(debug_kill_random_fish)と同じ(dead=true・dead_timer=0.0)になることを確認する。
+        // update_octopus_bitesはupdate()内でupdate_biology(死骸浮上でdead_timerを進める)より
+        // 先に走るため、死亡直後の状態を見たい本テストではupdate_octopus_bitesだけを直接呼ぶ。
+        let mut sim = Simulation::new(Rng::new(662));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        octo.octopus_bite_count = OCTOPUS_BITES_TO_DIE - 1;
+        sim.fish.push(octo);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0));
+
+        // 確率イベントを待つため試行回数は十分大きめにしてある(spawn_flashのテストと同様、
+        // 無関係なコード変更で乱数消費数が変わってもタイミングがずれにくいようにする)。
+        for _ in 0..100000 {
+            sim.fish[0].octopus_bite_immunity_timer = 0.0; // 連打防止をバイパスして判定に到達させる
+            sim.update_octopus_bites(0.1);
+            if sim.fish[0].dead {
                 break;
             }
         }
 
-        assert!(eaten, "空腹の成魚はタコに捕食されるはず");
-        assert_eq!(sim.fish.len(), 1, "捕食されたらタコだけが残る(タコは即消滅させる)はず");
+        assert!(sim.fish[0].dead, "OCTOPUS_BITES_TO_DIE回目のかじりで死亡するはず");
+        assert_eq!(
+            sim.fish[0].dead_timer, 0.0,
+            "死亡直後のdead_timerはdebug_kill_random_fishと同じく0.0のはず"
+        );
         assert_eq!(sim.fish[0].species, Species::Octopus);
+
+        // 参考: debug_kill_random_fishが作る死亡状態と同じフィールドになっていることを確認する。
+        let mut sim2 = Simulation::new(Rng::new(662));
+        sim2.fish.push(Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0));
+        sim2.debug_kill_random_fish();
+        assert_eq!(sim.fish[0].dead, sim2.fish[0].dead);
+        assert_eq!(sim.fish[0].dead_timer, sim2.fish[0].dead_timer);
+    }
+
+    #[test]
+    fn octopus_bite_weakening_heals_over_time_without_further_bites() {
+        // これ以上かじられなければ、かじられ弱りはOCTOPUS_BITE_RECOVER_INTERVALごとに
+        // 1段階ずつ時間経過で癒えて、最終的に無傷(0)に戻るはず(ピラニアの被噛みつき
+        // 回復テストと同じ構造)。
+        let mut sim = Simulation::new(Rng::new(663));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        octo.octopus_bite_count = 2;
+        sim.fish.push(octo);
+
+        // 1インターバル未満ではまだ回復しない(keep_fed=trueで満腹を保ち餓死を避ける。
+        // タコは1匹だけなのでかじる成魚はおらず、追加のかじりは起きない)。
+        run(&mut sim, OCTOPUS_BITE_RECOVER_INTERVAL - 5.0, 0.5, 80, 40, true);
+        assert_eq!(sim.fish[0].octopus_bite_count, 2, "インターバル未満では回復しないはず");
+
+        run(&mut sim, 6.0, 0.5, 80, 40, true);
+        assert_eq!(sim.fish[0].octopus_bite_count, 1, "1インターバルで1段階回復するはず");
+
+        run(&mut sim, OCTOPUS_BITE_RECOVER_INTERVAL + 1.0, 0.5, 80, 40, true);
+        assert_eq!(sim.fish[0].octopus_bite_count, 0, "さらに1インターバルで無傷に戻るはず");
+    }
+
+    #[test]
+    fn octopus_weakened_by_bites_swims_slower_than_an_unbitten_one() {
+        // かじられ回数が増えるほど遊泳速度倍率(speed_mult)が下がるはず(空腹段階・病気を
+        // そろえて、かじられぶんだけの差を直接確認する)。
+        let make = |bites: u8| {
+            let mut f = Fish::new(Species::Octopus, Stage::Adult, 0.0, 0.0);
+            f.hunger = 50.0; // 全個体で同じ空腹段階にそろえる
+            f.sick = false;
+            f.octopus_bite_count = bites;
+            f
+        };
+        let s0 = make(0).speed_mult();
+        let s1 = make(1).speed_mult();
+        let s2 = make(2).speed_mult();
+        let s3 = make(3).speed_mult();
+        assert!(s1 < s0, "1回かじられた個体は無傷より遅いはず: s1={s1} s0={s0}");
+        assert!(s2 < s1, "2回かじられた個体はさらに遅いはず: s2={s2} s1={s1}");
+        assert!(s3 < s2, "3回かじられた個体はさらに遅いはず: s3={s3} s2={s2}");
+    }
+
+    #[test]
+    fn the_bite_immunity_window_prevents_back_to_back_bites() {
+        // 免疫時間中は、隣に成魚がいて何tick進めても新たなかじり判定を受けないこと、
+        // 免疫が切れれば再びかじられることを確認する。
+        let mut sim = Simulation::new(Rng::new(664));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        octo.octopus_bite_immunity_timer = 999.0;
+        sim.fish.push(octo);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0));
+
+        // 免疫が切れないよう毎tick高い値に戻し続け、圏内に成魚を置き続けても噛まれないこと。
+        for _ in 0..2000 {
+            sim.fish[0].hidden = false;
+            sim.fish[0].hidden_timer = 999.0;
+            sim.fish[0].octopus_bite_immunity_timer = 999.0;
+            sim.fish[0].hunger = MAX_HUNGER;
+            sim.fish[1].hunger = MAX_HUNGER;
+            sim.fish[1].x = sim.fish[0].x;
+            sim.fish[1].y = sim.fish[0].y;
+            sim.update(0.1, 80, 40);
+        }
+        assert_eq!(sim.fish[0].octopus_bite_count, 0, "免疫時間中はかじられないはず");
+        assert!(!sim.fish[0].dead, "免疫時間中は死なないはず");
+
+        // 免疫を解除すれば、同じ状況で今度はかじられるはず。
+        sim.fish[0].octopus_bite_immunity_timer = 0.0;
+        land_one_octopus_bite(&mut sim);
+        assert!(
+            sim.fish[0].octopus_bite_count >= 1,
+            "免疫が切れれば再びかじられるはず"
+        );
     }
 
     #[test]

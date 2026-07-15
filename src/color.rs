@@ -56,6 +56,18 @@ pub fn apply_murkiness(c: Color, pollution_frac: f64) -> Color {
     lerp(c, MURKY_TINT, t)
 }
 
+// 浄化剤が効いている間、水を紫色に染める演出用。
+pub const PURIFIER_TINT: Color = Color::new(150, 60, 210);
+// 濃度(purifier_concentration)は1.0(通常最大)を超えても連投で積み上がる仕様のため、
+// 入力側はクランプせず混合率だけ上限で頭打ちにする。100%を超えて積み上がるほど
+// 紫がどんどん濃くなり、ほぼ透明度を失う(PURIFIER_TINT一色に近づく)くらいまで
+// 染まっていく。
+pub const PURIFIER_TINT_MAX_MIX: f64 = 0.97;
+pub fn apply_purifier_tint(c: Color, purifier_concentration: f64) -> Color {
+    let t = (purifier_concentration.max(0.0) * 0.5).min(PURIFIER_TINT_MAX_MIX);
+    lerp(c, PURIFIER_TINT, t)
+}
+
 // 元気メーター用のグラデーション色(赤=低 → 黄=中 → 緑=高)
 pub const VITALITY_LOW: Color = Color::new(214, 48, 44); // 赤(瀕死)
 pub const VITALITY_MID: Color = Color::new(232, 198, 46); // 黄(普通)

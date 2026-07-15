@@ -5,7 +5,8 @@ use crate::color::Color;
 use crate::sim::{
     AGILITY_FRY_SIZE_STEPS, AGILITY_MULT_MAX, AGILITY_MULT_MIN, AGILITY_STEP, FULL_THRESHOLD,
     GENERAL_GROWTH_SCALE_STEP, GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE, HUNGRY_THRESHOLD, MAX_HUNGER,
-    OCTOPUS_BASE_SCALE_BONUS, PIRANHA_BITE_SPEED_MULT, PIRANHA_KILL_GROWTH_SCALE_STEP,
+    OCTOPUS_BASE_SCALE_BONUS, OCTOPUS_BITE_SPEED_MULT, PIRANHA_BITE_SPEED_MULT,
+    PIRANHA_KILL_GROWTH_SCALE_STEP,
     PIRANHA_MAX_KILL_STAGE, SIZE_SPEED_PENALTY_STEP, WHALE_BASE_SCALE_BONUS,
 };
 use serde::{Deserialize, Serialize};
@@ -195,6 +196,16 @@ pub struct Fish {
     // 結果として保証するための猶予)。
     #[serde(default)]
     pub ink_escape_timer: f64,
+    // タコがかじられた回数(0〜4)。5回目のかじられで死亡演出に入る(update_octopus_bites側で判定)。
+    #[serde(default)]
+    pub octopus_bite_count: u8,
+    // 直近のかじられからの経過時間。OCTOPUS_BITE_RECOVER_INTERVALごとに1段階回復する。
+    #[serde(default)]
+    pub octopus_bite_recover_timer: f64,
+    // かじってくる魚が続けて連打しないよう、直近にかじられてからの猶予(秒)。
+    // この間は同じ/別のどの魚からも新たなかじり判定を受けない。
+    #[serde(default)]
+    pub octopus_bite_immunity_timer: f64,
     // スター(無敵アイテム)取得後の残り無敵時間。0より大きい間は、誰からも捕食
     // されず、逆に触れた他の魚(ピラニア・タコを含む)を種類に関わらず捕食できる
     // (一時的な捕食者反転ギミック)。
@@ -297,6 +308,9 @@ impl Fish {
             den_y: 0.0,
             ink_cooldown: 0.0,
             ink_escape_timer: 0.0,
+            octopus_bite_count: 0,
+            octopus_bite_recover_timer: 0.0,
+            octopus_bite_immunity_timer: 0.0,
             dead: false,
             dead_timer: 0.0,
             invincible_timer: 0.0,
@@ -344,7 +358,10 @@ impl Fish {
         // ピラニアに噛まれて負傷しているほど遊泳速度が落ちる(弱るほど逃げ足が遅くなり、
         // 追加で噛まれやすくなる)。噛まれていない個体はインデックス0で倍率1.0=無影響。
         let wound_mult = PIRANHA_BITE_SPEED_MULT[self.piranha_bite_count.min(2) as usize];
-        base * sick_mult * wound_mult
+        // タコがかじられて弱っているほど遊泳速度が落ちる(弱るほど逃げ足が遅くなる)。
+        // かじられていない個体はインデックス0で倍率1.0=無影響。
+        let octopus_wound_mult = OCTOPUS_BITE_SPEED_MULT[self.octopus_bite_count.min(4) as usize];
+        base * sick_mult * wound_mult * octopus_wound_mult
     }
 
     // 見た目の拡大率(1.0=通常成魚サイズ)。全種共通の成長段階(growth_stage)に、

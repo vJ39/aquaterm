@@ -15,9 +15,9 @@ mod sim;
 mod sound;
 
 use color::{
-    apply_day_night, apply_murkiness, day_brightness, lerp, scale, vitality_color, water_gradient, Color, CURSOR,
-    AFFINITY_FLAG, CRITICAL_FLAG, DEAD_FLAG, ELDERLY_FLAG, GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND,
-    SAND_DEEP, SICK_FLAG, SICK_TINT, WOUNDED_FLAG,
+    apply_day_night, apply_murkiness, apply_purifier_tint, day_brightness, lerp, scale, vitality_color,
+    water_gradient, Color, CURSOR, AFFINITY_FLAG, CRITICAL_FLAG, DEAD_FLAG, ELDERLY_FLAG, GAUGE_EMPTY, HUNGRY_FLAG,
+    INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG, SICK_TINT, WOUNDED_FLAG,
 };
 use chrono::{Local, Timelike};
 use crossterm::{
@@ -618,7 +618,14 @@ fn render_tank(
             };
             // 水質パラメータの可視化: 汚れているほど水が濁った緑〜茶系の色に寄る。
             let pollution_frac = sim.pollution / sim::POLLUTION_MAX;
-            let c = apply_day_night(apply_murkiness(water_gradient(frac), pollution_frac), day);
+            // 浄化剤が効いている間は紫色に染める。濃度が薄まるにつれて紫も薄れていく。
+            let c = apply_day_night(
+                apply_purifier_tint(
+                    apply_murkiness(water_gradient(frac), pollution_frac),
+                    sim.purifier_concentration,
+                ),
+                day,
+            );
             for x in 0..w {
                 fb.set_pixel(x, y, c);
             }
@@ -1032,6 +1039,12 @@ fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usi
         put(fb, f.x + half + 3.0, meter_y, CRITICAL_FLAG, w, h);
     } else if f.piranha_bite_count == 1 {
         put(fb, f.x + half + 3.0, meter_y, WOUNDED_FLAG, w, h);
+    } else if f.octopus_bite_count >= 3 {
+        // タコが成魚にかじられて弱っている表示。半分以上(3〜4回)で瀕死、
+        // 1〜2回で負傷。ピラニアの負傷とは同時に立たないので同じスロットを排他で使う。
+        put(fb, f.x + half + 3.0, meter_y, CRITICAL_FLAG, w, h);
+    } else if f.octopus_bite_count >= 1 {
+        put(fb, f.x + half + 3.0, meter_y, WOUNDED_FLAG, w, h);
     }
     // 寿命間近フラグ: 他のフラグに紛れて見落とされるとの指摘を受け、小さな1ドットの
     // 色違いではなく、頭上のゲージ行全体を高速に点滅させる派手な警告表示にする
@@ -1050,9 +1063,9 @@ fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usi
     }
 }
 
-// 寿命間近フラグを表示する残り時間のしきい値。Lキー(debug_age_random_fish_near_death)が
-// 残り10秒に設定するので、少し余裕を持たせてすぐ確認できるようにする。
-const ELDERLY_WARNING_SECS: f64 = 15.0;
+// 寿命間近フラグを表示する残り時間のしきい値(10分)。Lキー(debug_age_random_fish_near_death)
+// で寿命を詰めた個体はもちろん、自然に寿命が近づいた個体も早めに気づけるようにする。
+const ELDERLY_WARNING_SECS: f64 = 600.0;
 // 寿命間近フラグの点滅速度(高いほど速く点滅する)。目立たせるため無敵時のブリンク
 // (INVINCIBLE_BLINK_FREQ)よりさらに速くする。
 const ELDERLY_BLINK_FREQ: f64 = 12.0;
@@ -1723,6 +1736,11 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / C 浄化剤 / D タコつぼ / P 水草",
         "          H 全員空腹に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
         "          J 水質トグル / X ランダム死亡 / Z スター投入 / L 寿命残り10秒(いずれもデバッグ)",
+        "",
+        "  注意: 浄化剤(C)は着水後すぐ水質が下がるが、薄まりきる(約10分)まで",
+        "        通常種の食欲不振・全種の老化加速が続く。連投すると濃度が積み上がり、",
+        "        水が濃い紫に染まって効果も副作用も強まる(100%超でタコ、50%以上で",
+        "        稚魚が死亡するほど強力なので、使いすぎに注意)。",
         "",
     ];
     // 図鑑が狭い端末で収まらない場合のテキストのみフォールバック行
