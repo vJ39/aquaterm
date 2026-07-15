@@ -1012,9 +1012,9 @@ impl Sprite {
         }
     }
 
-    // 水底に完全に沈み切った死骸用の「横倒れ」スプライト。通常種5種
-    // (has_lying_species)のみ専用パターンを持つ(ピラニア・タコ・クジラは今回の
-    // スコープ外。呼ばれてもfor_fishの通常成魚パターンにフォールバックする)。
+    // 水底に完全に沈み切った死骸用の「横倒れ」スプライト。通常種5種に
+    // ピラニア・タコ・クジラを加えた8種、つまり現在のSpecies全種が専用パターンを
+    // 持つ(has_lying_sprite参照)。
     //
     // 通常の泳ぎ姿(for_fish)は左右対称寄りに描かれていて(上下反転しても
     // ほぼ同じ絵になる種が多い)、これが「死んだら仰向けにするだけ」の演出だと
@@ -1023,7 +1023,13 @@ impl Sprite {
     // 取り除いて滑らかな輪郭にし、下半分(腹側の行)のヒレはそのまま残す。
     // 「倒れて砂に押しつけられた側のヒレが見えなくなり、上を向いた側のヒレだけが
     // 広がって見える」という見立て。目(E)・尾(<)がある中央の行は、向きの
-    // 手がかりを保つためどちらの半分に含めず必ず残す。
+    // 手がかりを保つためどちらの半分に含めず必ず残す。ピラニア・クジラも
+    // 同じ標準的な魚型の構図なので、この規則をそのまま適用している。
+    //
+    // タコだけは例外。放射状に足が伸びる特殊な体型でヒレ('F')自体を使わない
+    // ため、同じ規則は当てはまらない。代わりに、マント(頭)を体の片側へ寄せ、
+    // 足を反対側へ這わせる専用の構図にしている(詳細はOctopusのmatchアーム上の
+    // コメント参照)。
     //
     // 「右体側が上/左体側が上」の描き分けは絵として持たない(左右対称なドット絵の
     // ため、体側ごとに違う模様を描いても差が見えにくい)。左右反転は既存の
@@ -1124,11 +1130,83 @@ impl Sprite {
                 "......FFFF......",
                 "......FF.FF.....",
             ],
-            // ピラニア・タコ・クジラは今回のスコープ外。専用の横倒れ姿を持たないので、
-            // 通常の成魚パターン(growth_stage=0)を素通しで使う(呼び出し元は
-            // has_lying_species()でこの3種を先に除外しているため、実際には
-            // 通常プレイでは到達しない想定のフォールバック)。
-            _ => return Sprite::for_fish(species, stage, 0),
+            // ピラニアは既存5種と同じ標準的な魚型の構図なので、同じ変換規則
+            // (背側の行のヒレ('F')だけを'.'に置き換え、目('E')のある行以降は
+            // そのまま残す)をそのまま適用して描き直した。
+            (Species::Piranha, Stage::Fry) => &[
+                "..........",
+                ".BBBBBBBB.",
+                ".BBBBBBBB<",
+                ".BBBBBBBBE",
+                ".BBB.AAA<F",
+            ],
+            (Species::Piranha, Stage::Adult) => &[
+                "..............",
+                ".BB..BBBB.....",
+                "..BBBBBBBBB...",
+                ".BBBBBBBBBBB<.",
+                ".BBBBBBBBBBBBE",
+                ".BBB..AAAAAB<F",
+                "....BBAAABB...",
+            ],
+            // タコは放射状に足が伸びる特殊な体型で、他種のような「背側のヒレを
+            // 消す」規則は当てはまらない(そもそもヒレ('F')を使っていない)。
+            // 代わりに、マント(頭)ごと体の片側(右)へ寄せ、足を反対側(左)へ
+            // 向かって長さの異なる筋として這わせることで、「横倒れになって
+            // 足が片側にだらりと伸びている」見た目にする専用パターンを描いた
+            // (通常の泳ぎ姿の単純な上下反転とは全く異なる構図)。
+            (Species::Octopus, Stage::Fry) => &[
+                "........BBB.",
+                ".......BBEBB",
+                ".......BBBBB",
+                ".BABBABBBBB.",
+                "...BABBAB...",
+                ".....BABB...",
+            ],
+            (Species::Octopus, Stage::Adult) => &[
+                "..............BBB..",
+                "............BBBBBB.",
+                "...........BBEBBEBB",
+                "...........BBBBBBBB",
+                "..BABBABBAB.BBBBBB.",
+                "BABBABBABBAB.......",
+                "...BABBABBAB.......",
+                ".....BABBABB.......",
+                ".......BABBA.......",
+                ".........BAB.......",
+            ],
+            // クジラも既存5種と同じ標準的な魚型の構図(頭側にE、鰭がF)なので、
+            // ピラニアと同じ変換規則をそのまま適用した。クジラのFはドット絵中
+            // 背中の隆起(小さな背びれ)1箇所だけなので、この変換で消えるのは
+            // その1箇所のみになる。
+            (Species::Whale, Stage::Fry) => &[
+                "..................",
+                "<<...BBBBBBBBBB...",
+                "<<<.BBBBBBBBBBBBB.",
+                "..<BBBBBBBBBBBBBEB",
+                "..<BBBBBBBBBBBBBBB",
+                "..<BBBBAAAAAAAABBB",
+                "<<<.BBBAAAAAAAABB.",
+                "<<...BBBBBBBBBB...",
+            ],
+            (Species::Whale, Stage::Adult) => &[
+                "...................................",
+                "..........BBBBBBBBBBBBBBBBB........",
+                "..........BBBBBBBBBBBBBBBBBBB......",
+                "<<........BBBBBBBBBBBBBBBBBBBBB....",
+                "<<<.....BBBBBBBBBBBBBBBBBBBBBBBB...",
+                ".<<<...BBBBBBBBBBBBBBBBBBBBBBBBBB..",
+                "...<<.BBBBBBBBBBBBBBBBBBBBBBBBBEBB.",
+                "....<BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                "....<BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                "....<BBBBBBBBBBBBBBBBBBBBBBBBABBBBB",
+                "...<<.BBBBBBBBBBBBBBBBBBBBBAAABBBB.",
+                ".<<<...BBBBAAAAAAAAAAAAAAAAAAABBB..",
+                "<<<.....BBBAAAAAAAAAAAAAAAAAAABB...",
+                "<<........BAAAAAAAAAAAAAAAAAABB....",
+                "..........BAAAAAAAAAAAAAAAABB......",
+                "..........BBBBBBBBBBBBBBBBB........",
+            ],
         };
         Sprite::parse(lines, palette(species))
     }
@@ -1240,12 +1318,20 @@ pub fn fin_color(species: Species) -> Color {
 }
 
 // 水底に沈み切った死骸用の「横倒れ」専用スプライト(Sprite::for_lying_fish)を
-// 持つ種かどうか。今回のスコープは通常種5種のみで、ピラニア・タコ・クジラは
-// 対象外(描画側main.rsはこれがfalseの種には従来通りの上下反転(仰向け)を使う)。
+// 持つ種かどうか。通常種5種にピラニア・タコ・クジラを加えた8種、つまり現在の
+// Species全種が対象(描画側main.rsはこれがfalseの種には従来通りの上下反転
+// (仰向け)を使うが、現時点では該当する種はない)。
 pub fn has_lying_sprite(species: Species) -> bool {
     matches!(
         species,
-        Species::Neon | Species::Goldfish | Species::Guppy | Species::Angelfish | Species::Betta
+        Species::Neon
+            | Species::Goldfish
+            | Species::Guppy
+            | Species::Angelfish
+            | Species::Betta
+            | Species::Piranha
+            | Species::Octopus
+            | Species::Whale
     )
 }
 
@@ -1707,20 +1793,22 @@ mod tests {
         }
     }
 
-    // 横倒れ専用スプライト(has_lying_sprite)は、今回のスコープである通常5種
-    // (Species::COMMON)だけがtrueで、スコープ外のピラニア・タコ・クジラは
-    // falseのままであることを確認する(main.rs側はfalseの種には従来通りの
-    // 上下反転(仰向け)を使う)。
+    // 横倒れ専用スプライト(has_lying_sprite)は、通常5種にピラニア・タコ・
+    // クジラを加えた8種、つまり現在のSpecies全種でtrueになったことを確認する
+    // 回帰テスト(元は通常5種のみが対象で、この3種はfalseだった)。
     #[test]
-    fn has_lying_sprite_covers_only_the_five_common_species() {
-        for &sp in &Species::COMMON {
-            assert!(has_lying_sprite(sp), "{sp:?}: 通常種は横倒れ専用スプライトを持つはず");
-        }
-        for sp in [Species::Piranha, Species::Octopus, Species::Whale] {
-            assert!(
-                !has_lying_sprite(sp),
-                "{sp:?}: 今回のスコープ外の種は横倒れ専用スプライトを持たないはず"
-            );
+    fn has_lying_sprite_covers_all_eight_species() {
+        for sp in [
+            Species::Neon,
+            Species::Goldfish,
+            Species::Guppy,
+            Species::Piranha,
+            Species::Angelfish,
+            Species::Betta,
+            Species::Octopus,
+            Species::Whale,
+        ] {
+            assert!(has_lying_sprite(sp), "{sp:?}: 横倒れ専用スプライトを持つはず");
         }
     }
 
@@ -1729,7 +1817,16 @@ mod tests {
     // Fry/Adultの両ステージで、実際に異なる絵柄になっていることを確認する。
     #[test]
     fn lying_sprite_is_a_distinct_pose_not_just_a_flipped_swim_sprite() {
-        for &sp in &Species::COMMON {
+        for sp in [
+            Species::Neon,
+            Species::Goldfish,
+            Species::Guppy,
+            Species::Piranha,
+            Species::Angelfish,
+            Species::Betta,
+            Species::Octopus,
+            Species::Whale,
+        ] {
             for stage in [Stage::Fry, Stage::Adult] {
                 let swim = Fish::new(sp, stage, 0.0, 0.0).sprite();
                 let lying = Fish::new(sp, stage, 0.0, 0.0).lying_sprite();

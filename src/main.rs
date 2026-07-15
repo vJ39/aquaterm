@@ -2463,8 +2463,10 @@ mod tests {
 
     // 横倒れスプライトへの切り替え判定(corpse_uses_lying_sprite)は、死亡していて
     // かつ水底に沈み切っており(settled_at_bottom)、かつ対応種(has_lying_sprite)の
-    // 場合だけtrueになるはず。生存中・浮遊中/沈降中・スコープ外種(ピラニア・
-    // タコ・クジラ)のいずれもfalseのままであることを確認する。
+    // 場合だけtrueになるはず。生存中・浮遊中/沈降中はfalseのままであることを
+    // 確認する。対応種は通常5種にピラニア・タコ・クジラを加えた8種、つまり
+    // 現在のSpecies全種なので、着地済みならどの種でもtrueになることも合わせて
+    // 確認する。
     #[test]
     fn corpse_uses_lying_sprite_requires_dead_settled_and_a_supported_species() {
         let mut f = Fish::new(Species::Neon, Stage::Adult, 10.0, 10.0);
@@ -2483,12 +2485,12 @@ mod tests {
         );
 
         for sp in [Species::Piranha, Species::Octopus, Species::Whale] {
-            let mut out_of_scope = Fish::new(sp, Stage::Adult, 10.0, 10.0);
-            out_of_scope.dead = true;
-            out_of_scope.settled_at_bottom = true;
+            let mut settled = Fish::new(sp, Stage::Adult, 10.0, 10.0);
+            settled.dead = true;
+            settled.settled_at_bottom = true;
             assert!(
-                !corpse_uses_lying_sprite(&out_of_scope),
-                "{sp:?}: 今回のスコープ外の種は着地済みでもfalseのままのはず"
+                corpse_uses_lying_sprite(&settled),
+                "{sp:?}: 対応種に加わったので着地済みならtrueになるはず"
             );
         }
     }
