@@ -125,16 +125,19 @@ pub const SICK_DEATH_TIME: f64 = 630.0;
 // 最悪値・悪化/浄化レートは全て同じ倍率(5倍)でスケールしてあり、フラクション
 // (pollution/POLLUTION_MAX)の時間変化・タイミングは以前と同じになるようにしている。
 pub const POLLUTION_MAX: f64 = 500.0;
-pub const POLLUTION_PER_LANDED_FOOD: f64 = 0.15; // 水底に堆積した餌1個あたり/秒
-pub const POLLUTION_PER_LANDED_MEDICINE: f64 = 0.15; // 水底に堆積した薬1個あたり/秒
-pub const POLLUTION_PER_LANDED_MEAT: f64 = 0.25; // 水底に堆積した肉餌1個あたり/秒(食べ残りやすいぶん重め)
+// 全体の進行速度(悪化・浄化とも)を当初比1/40まで下げてあり、水質はゆっくり
+// 変化する(ただし正味の悪化・浄化のバランス=フラクションの変化の仕方は
+// 変えていないつもり。悪化・浄化を比例的に下げてバランスを保っている)。
+pub const POLLUTION_PER_LANDED_FOOD: f64 = 0.015; // 水底に堆積した餌1個あたり/秒
+pub const POLLUTION_PER_LANDED_MEDICINE: f64 = 0.015; // 水底に堆積した薬1個あたり/秒
+pub const POLLUTION_PER_LANDED_MEAT: f64 = 0.025; // 水底に堆積した肉餌1個あたり/秒(食べ残りやすいぶん重め)
 // 病気・死亡個体は堆積物より一段強い悪化レートにする(急激に悪化させる)。
-pub const POLLUTION_PER_SICK_FISH: f64 = 1.5;
-pub const POLLUTION_PER_DEAD_FISH: f64 = 3.0;
-pub const POLLUTION_NATURAL_DECAY: f64 = 0.75; // 常時かかる自然浄化(悪化要因が無ければ改善していく)
+pub const POLLUTION_PER_SICK_FISH: f64 = 0.05;
+pub const POLLUTION_PER_DEAD_FISH: f64 = 0.1;
+pub const POLLUTION_NATURAL_DECAY: f64 = 0.075; // 常時かかる自然浄化(悪化要因が無ければ改善していく)
 // 捕食が成立した瞬間に一気に加算する悪化量(血肉が水中に飛び散る一発イベントの
 // ため、継続的なレートではなく単発の大きな加算にしてある)。
-pub const POLLUTION_PREDATION_SPIKE: f64 = 15.0;
+pub const POLLUTION_PREDATION_SPIKE: f64 = 0.375;
 // 病気の発症確率(DISEASE_CHANCE_PER_SEC)にかかる乗数の上限。水質最悪(POLLUTION_MAX)で
 // 発症確率が最大でこの倍になる(水質の悪化を病気ルート経由で生存に影響させる仕組み)。
 pub const POLLUTION_SICK_CHANCE_MAX_MULT: f64 = 4.0;
@@ -142,6 +145,10 @@ pub const POLLUTION_SICK_CHANCE_MAX_MULT: f64 = 4.0;
 // なくても発症判定の対象に含める(満腹を保ってさえいれば水質が最悪でも病気に
 // ならない、という抜け穴を防ぐため)。
 pub const POLLUTION_SICK_ELIGIBLE_FRAC: f64 = 0.5;
+// 稚魚(Fry)は病気を経由する通常の弱り→死亡経路(SICK_WEAK_TIME/SICK_DEATH_TIME)を
+// 待たず、水質が上記の閾値以上悪化している間、毎秒この確率で直接力尽きる
+// (稚魚は成魚より水質悪化に弱く、すぐ死んでしまうという仕様のため)。
+pub const POLLUTION_FRY_DEATH_CHANCE_PER_SEC: f64 = 0.1;
 
 // --- 死亡演出パラメータ ---
 // 死んだ魚は、体内のガスによる浮力(時間とともに減衰する)と重力・水の抵抗を
@@ -361,9 +368,23 @@ pub const PIRANHA_FEAR_STRENGTH: f64 = 360.0;
 // (ピラニア・タコ)を倒せる(通常の魚同士を襲うことはない)。ランダムな自然発生は
 // させず、`Z`キー(debug_spawn_star)経由でのみ出現する。 ---
 pub const STAR_LIFETIME: f64 = 45.0; // 誰も取りに来ないまま経過すると消える
+// デバッグ投入(`Z`キー)時、カーソル位置から最低限ずらす距離。カーソルもスターも
+// 同じ十字形を描くため、ずらさないとカーソルに完全に隠れて見えなくなる。
+pub const STAR_CURSOR_OFFSET: f64 = 4.0;
+// カーソル周辺に散らす追加の距離の幅(何個も押して増やせるよう、毎回ランダムな
+// 方向・距離に置いて重なりにくくする)。
+pub const STAR_SPAWN_SCATTER_RADIUS: f64 = 6.0;
 pub const STAR_PICKUP_RADIUS: f64 = 5.0; // 魚がスターに触れて取得できる距離
-pub const STAR_INVINCIBLE_DURATION_MIN: f64 = 10.0;
-pub const STAR_INVINCIBLE_DURATION_MAX: f64 = 20.0;
+// スター(まだ取得していない側)への誘引の強さ。バグ修正: 以前はこの誘引ベクトルが
+// 存在せず、偶然の遊泳で触れない限り誰もスターに近づいて行かなかった。ピラニアの
+// 狩りと同程度の強さにして、はっきり泳いで向かっている様子が見えるようにする。
+pub const STAR_ATTRACT_PULL: f64 = PIRANHA_HUNT_PULL;
+pub const STAR_INVINCIBLE_DURATION_MIN: f64 = 60.0; // 1分固定
+pub const STAR_INVINCIBLE_DURATION_MAX: f64 = 60.0;
+// 無敵中、捕食者(ピラニア・タコ)を検知して積極的に追いかけ回すための吸引パラメータ。
+// ピラニアの狩りと同程度の強さにして、はっきり追い回している様子が見えるようにする。
+pub const STAR_HUNT_RADIUS: f64 = PIRANHA_HUNT_RADIUS;
+pub const STAR_HUNT_PULL: f64 = PIRANHA_HUNT_PULL;
 // 無敵中の捕食判定距離。既存の捕食者(ピラニア・タコ)の口基準判定と同じ考え方で、
 // 通常種のスプライトにも十分届くよう広めに取る。
 pub const STAR_STRIKE_RADIUS: f64 = 7.0;
@@ -644,6 +665,7 @@ pub enum SfxEvent {
     Ink,         // タコが墨を吐いた音
     Tap,         // カーソル位置を軽くノックした(とんとん)音。GlassKnockより柔らかく短い
     UiClick,     // 各種トグルをONにした瞬間の、乾いた小さいクリック音(やかましくないもの)
+    StarPickup,  // スターを取得して無敵になった瞬間の、控えめなキラキラ音
 }
 
 #[derive(Clone, Debug)]
@@ -1687,12 +1709,19 @@ impl Simulation {
 
     // デバッグ用: スター(無敵アイテム)をカーソル位置に確実に投入する。既にスターが
     // 出ている場合は何もしない(update_starsの「同時に複数出さない」方針に合わせる)。
+    // 押すたびにカーソル周辺へ1個ずつ追加する(何個でも重ねて投入できる。ネタ機能の
+    // ため出現数を制限する必要はない)。カーソルとスターは同じ十字形を描くため、
+    // カーソルにちょうど重なる位置(距離0)には置かず、STAR_CURSOR_OFFSET以上
+    // 離れたランダムな方向・距離に散らして置く。
     pub fn debug_spawn_star(&mut self, cursor_x: f64, cursor_y: f64, pix_w: usize, pix_h: usize) {
-        if !self.stars.is_empty() {
-            self.set_message("既にスターが出ている(デバッグ)");
-            return;
-        }
-        let (x, y) = clamp_point(cursor_x, cursor_y, pix_w, pix_h);
+        let angle = self.rng.range(0.0, std::f64::consts::TAU);
+        let dist = self.rng.range(STAR_CURSOR_OFFSET, STAR_CURSOR_OFFSET + STAR_SPAWN_SCATTER_RADIUS);
+        let (x, y) = clamp_point(
+            cursor_x + dist * angle.cos(),
+            cursor_y + dist * angle.sin(),
+            pix_w,
+            pix_h,
+        );
         self.stars.push(Star {
             x,
             y,
@@ -2153,8 +2182,30 @@ impl Simulation {
                 None
             };
 
+            // スター(無敵アイテム)への誘引: 取得できるのは捕食者でない・まだ無敵でない
+            // 個体だけなので、それ以外は反応しない。バグ修正(新規): 以前は誘引ベクトルが
+            // 存在せず、偶然の遊泳で触れない限り誰もスターに近づいて行かなかった。
+            let nearest_star = if !sp.is_predator() && !is_invincible_self && !self.stars.is_empty() {
+                let mut best = f64::INFINITY;
+                let mut best_pos = None;
+                for s in &self.stars {
+                    let d = (s.x - fx).powi(2) + (s.y - fy).powi(2);
+                    if d < best {
+                        best = d;
+                        best_pos = Some((s.x, s.y));
+                    }
+                }
+                best_pos.map(|pos| (pos, best.sqrt().max(0.001)))
+            } else {
+                None
+            };
+
             // 捕食者(ピラニア・タコ)ごとの狩りパラメータ。タコもピラニアと同じ「頻繁に狩る」
             // 方針を共有しつつ、専用の定数で独立に調整できるようにしている。
+            // 無敵中の一時的捕食者(本来は捕食されない側の魚)にも、同様に狩りの吸引
+            // パラメータを与える。そうしないと、追跡中でない限り出会えず「捕食者を
+            // 倒せる」だけで実際には追いかけ回さない(見た目に地味な)ギミックに
+            // なってしまうため。
             let (hunt_threshold, hunt_radius, hunt_pull) = match sp {
                 Species::Piranha => (PIRANHA_HUNT_HUNGER_THRESHOLD, PIRANHA_HUNT_RADIUS, PIRANHA_HUNT_PULL),
                 Species::Octopus => (
@@ -2162,7 +2213,8 @@ impl Simulation {
                     OCTOPUS_HUNT_RADIUS,
                     OCTOPUS_HUNT_PULL,
                 ),
-                _ => (0.0, 0.0, 0.0), // 非捕食者では使わない(is_predator()でガードされる)
+                _ if is_invincible_self => (MAX_HUNGER, STAR_HUNT_RADIUS, STAR_HUNT_PULL),
+                _ => (0.0, 0.0, 0.0), // 非捕食者(かつ無敵でもない)では使わない
             };
             // 墨が近くに広がっている間、捕食者は獲物を検知できない(「視界が悪くなる」演出)。
             // 描画側のアニメーション曲線とは独立に、ゲームロジック側はINK_MAX_RADIUS基準で
@@ -2200,7 +2252,11 @@ impl Simulation {
             // 捕食者の狩り: 空腹度が閾値未満・クールダウン明けなら、近くの獲物を先に探しておく
             // (自分と同種・ピラニア同士・タコからピラニアは対象外。タコが隠れている間も対象外)。
             // 追いかけている間は通常の遊泳を弱め、吸引ベクトルをはっきり優先させる。
-            let chase_target = if sp.is_predator() && !blinded_by_ink && still_hungry_for_hunt && predation_cooldown <= 0.0 {
+            let chase_target = if (sp.is_predator() || is_invincible_self)
+                && !blinded_by_ink
+                && still_hungry_for_hunt
+                && predation_cooldown <= 0.0
+            {
                 let mut best = f64::INFINITY;
                 let mut best_pos = None;
                 for (
@@ -2245,9 +2301,11 @@ impl Simulation {
                         best_pos = Some((px, py));
                     }
                 }
-                best_pos
-                    .map(|pos| (pos, best.sqrt().max(0.001)))
-                    .filter(|&(_, dist)| dist < hunt_radius)
+                // 無敵中の一時的捕食者は、スターへの誘引と同程度に徹底的に追いかけ
+                // 回すため、検知範囲を距離無制限にする(hunt_radiusによる打ち切りをしない)。
+                best_pos.map(|pos| (pos, best.sqrt().max(0.001))).filter(|&(_, dist)| {
+                    is_invincible_self || dist < hunt_radius
+                })
             } else {
                 None
             };
@@ -2314,6 +2372,7 @@ impl Simulation {
             // はっきり優先させる(「一直線に向かう/逃げる」のが見た目でわかるように)。
             let normal_move_mix = if nearest_food.is_some()
                 || nearest_meat.is_some()
+                || nearest_star.is_some()
                 || chase_target.is_some()
                 || is_fleeing_predator
             {
@@ -2373,6 +2432,13 @@ impl Simulation {
                     * HUNGRY_FOOD_PULL_BOOST;
                 ax += (bx - fx) / dist * pull;
                 ay += (by - fy) / dist * pull;
+            }
+
+            // スターへの誘引: 空腹度に関わらず、見つけたら一直線に向かう
+            // (ゲームとして面白い一時的パワーアップのため、餌のような空腹条件は設けない)。
+            if let Some(((bx, by), dist)) = nearest_star {
+                ax += (bx - fx) / dist * STAR_ATTRACT_PULL;
+                ay += (by - fy) / dist * STAR_ATTRACT_PULL;
             }
 
             // 捕食者の狩り: 探しておいた獲物へ向かって強く近づく(実際の捕食判定は
@@ -2884,6 +2950,7 @@ impl Simulation {
             let duration = self.rng.range(STAR_INVINCIBLE_DURATION_MIN, STAR_INVINCIBLE_DURATION_MAX);
             self.fish[fi].invincible_timer = duration;
             self.set_message("スターを取得!無敵状態になった");
+            self.sound_events.push(SfxEvent::StarPickup);
         }
     }
 
@@ -3087,6 +3154,15 @@ impl Simulation {
                 f.dead = true;
                 f.dead_timer = 0.0;
                 deaths.push(format!("{}が老衰で力尽きた…", species_name(f.species)));
+            } else if f.stage == Stage::Fry
+                && heavily_polluted
+                && self.rng.next_f64() < POLLUTION_FRY_DEATH_CHANCE_PER_SEC * dt
+            {
+                // 稚魚は成魚より水質悪化に弱く、病気の弱り→死亡経路(SICK_WEAK_TIME/
+                // SICK_DEATH_TIME)を待たずに直接力尽きる。
+                f.dead = true;
+                f.dead_timer = 0.0;
+                deaths.push(format!("{}の稚魚が水質悪化で力尽きた…", species_name(f.species)));
             }
         }
 
@@ -3360,7 +3436,19 @@ impl Simulation {
                     self.fish[si].piranha_meals_since_full = 0;
                 }
             }
+            // タコが捕食されて死んだ場合、CORPSE_REMOVE_TIME経過やカニによる片付けを
+            // 待たずにこの場で個体が消えるため、対応するタコつぼもここで一緒に
+            // 片付ける(update_biology・update_crabs側の同種の後始末とは別経路なので、
+            // ここでも必要)。
+            let vanished_octopus_den = if prey_species == Species::Octopus {
+                Some((self.fish[pi].den_x, self.fish[pi].den_y))
+            } else {
+                None
+            };
             self.fish.remove(pi);
+            if let Some((dx, dy)) = vanished_octopus_den {
+                self.dens.retain(|d| !(d.x == dx && d.y == dy));
+            }
 
             // 血飛沫: 複数の粒子を捕食位置の周囲に散らし、寿命をわずかにばらつかせることで
             // 一斉に消えず尾を引くように見せる(派手・グロテスクな見た目にする実機要望対応)。
@@ -4719,6 +4807,56 @@ mod tests {
             !sim.fish[0].sick,
             "軽い汚れ(閾値未満)では満腹・非過密の魚は発症判定の対象外のはず"
         );
+    }
+
+    #[test]
+    fn heavily_polluted_water_kills_fry_quickly_without_going_through_sickness() {
+        // 稚魚は病気の弱り→死亡経路(SICK_WEAK_TIME/SICK_DEATH_TIME、合計10分超)を
+        // 待たず、水質が閾値以上悪化していると短時間で直接力尽きるはず。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(9003));
+        sim.pollution = POLLUTION_MAX; // 最悪
+        let mut fry = Fish::new(Species::Neon, Stage::Fry, 40.0, 20.0);
+        fry.hunger = MAX_HUNGER; // 満腹を維持し、空腹側の死因ではないことを明確にする
+        sim.fish.push(fry);
+
+        let mut died = false;
+        for _ in 0..300 {
+            if sim.fish.is_empty() {
+                died = true;
+                break;
+            }
+            sim.fish[0].hunger = MAX_HUNGER;
+            sim.pollution = POLLUTION_MAX;
+            sim.update(1.0, w, h);
+            if sim.fish[0].dead {
+                died = true;
+                break;
+            }
+        }
+        assert!(died, "水質最悪の稚魚は短時間(数分以内)で死亡演出に入るはず");
+    }
+
+    #[test]
+    fn heavily_polluted_water_does_not_directly_kill_adult_fish() {
+        // 直接死亡する経路は稚魚(Fry)限定。成魚は満腹・非過密であれば、水質最悪でも
+        // この経路では死なない(病気を経由する通常の経路のみ)。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(9004));
+        sim.pollution = POLLUTION_MAX;
+        let mut adult = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
+        adult.hunger = MAX_HUNGER;
+        sim.fish.push(adult);
+
+        for _ in 0..300 {
+            sim.fish[0].hunger = MAX_HUNGER;
+            sim.pollution = POLLUTION_MAX;
+            sim.update(1.0, w, h);
+            if sim.fish[0].sick {
+                break; // 病気経由の死亡は別の仕組みなので、発症したら打ち切る
+            }
+        }
+        assert!(!sim.fish[0].dead, "成魚は水質による直接死亡の対象外のはず");
     }
 
     #[test]
@@ -7084,12 +7222,33 @@ mod tests {
     }
 
     #[test]
-    fn debug_spawn_star_adds_a_star_but_not_when_one_already_exists() {
+    fn debug_spawn_star_adds_one_star_per_call_and_can_stack() {
+        // 何度も押してカーソル周辺に複数投入できることの回帰テスト
+        // (以前は既に1個あると追加できない制限があった)。
         let mut sim = Simulation::new(Rng::new(953));
         sim.debug_spawn_star(40.0, 20.0, 80, 40);
         assert_eq!(sim.stars.len(), 1, "スターが1つ投入されるはず");
         sim.debug_spawn_star(40.0, 20.0, 80, 40);
-        assert_eq!(sim.stars.len(), 1, "既にスターがある場合は追加しないはず");
+        assert_eq!(sim.stars.len(), 2, "既にスターがあっても追加で投入できるはず");
+        sim.debug_spawn_star(40.0, 20.0, 80, 40);
+        assert_eq!(sim.stars.len(), 3, "何個でも積み増せるはず");
+    }
+
+    #[test]
+    fn debug_spawn_star_is_offset_from_the_cursor_so_it_is_not_hidden_under_it() {
+        // 回帰テスト: カーソルとスターは同じ十字形を描くため、カーソル位置に
+        // そのまま重ねると後から描かれるカーソルに完全に隠れて見えなくなる
+        // バグがあった。カーソル位置からずらして投入することを確認する。
+        let mut sim = Simulation::new(Rng::new(958));
+        let (cursor_x, cursor_y) = (40.0, 20.0);
+        sim.debug_spawn_star(cursor_x, cursor_y, 80, 40);
+        let star = &sim.stars[0];
+        let dist = ((star.x - cursor_x).powi(2) + (star.y - cursor_y).powi(2)).sqrt();
+        assert!(
+            dist >= STAR_CURSOR_OFFSET - 0.01,
+            "スターはカーソル位置から離して投入されるはず(実際の距離: {})",
+            dist
+        );
     }
 
     #[test]
@@ -7749,8 +7908,102 @@ mod tests {
     }
 
     #[test]
+    fn fish_swims_toward_a_distant_star() {
+        // 回帰テスト: スターへの誘引ベクトルが無く、偶然近くを泳いだ時しか取得
+        // できないバグがあった。捕食者でない・まだ無敵でない魚は、離れた位置の
+        // スターに向かって速度がつくはず。
+        let (w, h) = (200, 100);
+        let mut sim = Simulation::new(Rng::new(959));
+        sim.fish
+            .push(Fish::new(Species::Neon, Stage::Adult, 20.0, 20.0));
+        sim.stars.push(Star {
+            x: 100.0,
+            y: 20.0,
+            life: STAR_LIFETIME,
+            phase: 0.0,
+        });
+
+        sim.update_movement(0.05, w as f64, h as f64 - sand_height(h) as f64);
+
+        assert!(
+            sim.fish[0].vx > 0.0,
+            "右側にあるスターへ向かって速度がつくはず(実際: vx={})",
+            sim.fish[0].vx
+        );
+    }
+
+    #[test]
+    fn predator_species_ignores_stars() {
+        // ピラニア・タコ自身はスターへの誘引ベクトルがつかないはず(取得できない
+        // ものに反応しない)。通常の遊泳(ランダムウォーク)自体は常に多少の速度を
+        // 生むため、単純に0であることではなく、同じ乱数シード・同じ初期状態で
+        // 「スターがある場合」と「無い場合」の結果が一致することを比較して検証する
+        // (一致すればスターは移動に一切影響していないと言える)。
+        let (w, h) = (200, 100);
+        let make_sim = |with_star: bool| {
+            let mut sim = Simulation::new(Rng::new(960));
+            let mut piranha = Fish::new(Species::Piranha, Stage::Adult, 20.0, 20.0);
+            piranha.hunger = MAX_HUNGER;
+            sim.fish.push(piranha);
+            if with_star {
+                sim.stars.push(Star {
+                    x: 100.0,
+                    y: 20.0,
+                    life: STAR_LIFETIME,
+                    phase: 0.0,
+                });
+            }
+            sim
+        };
+        let mut with_star = make_sim(true);
+        let mut without_star = make_sim(false);
+        with_star.update_movement(0.05, w as f64, h as f64 - sand_height(h) as f64);
+        without_star.update_movement(0.05, w as f64, h as f64 - sand_height(h) as f64);
+
+        assert_eq!(
+            with_star.fish[0].vx, without_star.fish[0].vx,
+            "ピラニアの速度はスターの有無で変わらないはず(反応していない)"
+        );
+    }
+
+    #[test]
+    fn already_invincible_fish_ignores_stars() {
+        // 既に無敵中の魚は、スターへの誘引ベクトルがつかないはず(もう1個
+        // 取得する必要が無いため)。通常の遊泳(ランダムウォーク)自体は常に
+        // 多少の速度を生むため、同じ乱数シード・同じ初期状態で「スターがある
+        // 場合」と「無い場合」の結果が一致することを比較して検証する。
+        let (w, h) = (200, 100);
+        let make_sim = |with_star: bool| {
+            let mut sim = Simulation::new(Rng::new(961));
+            let mut hero = Fish::new(Species::Neon, Stage::Adult, 20.0, 30.0);
+            hero.invincible_timer = 10.0;
+            sim.fish.push(hero);
+            if with_star {
+                sim.stars.push(Star {
+                    x: 100.0,
+                    y: 20.0,
+                    life: STAR_LIFETIME,
+                    phase: 0.0,
+                });
+            }
+            sim
+        };
+        let mut with_star = make_sim(true);
+        let mut without_star = make_sim(false);
+        with_star.update_movement(0.05, w as f64, h as f64 - sand_height(h) as f64);
+        without_star.update_movement(0.05, w as f64, h as f64 - sand_height(h) as f64);
+
+        assert_eq!(
+            with_star.fish[0].vx, without_star.fish[0].vx,
+            "無敵の魚の速度はスターの有無で変わらないはず(反応していない)"
+        );
+    }
+
+    #[test]
     fn star_out_of_pickup_range_is_not_collected() {
-        let (w, h) = (80, 40);
+        // 誘引ベクトルの追加(バグ修正: スターへ泳いで近づく挙動)により、update()を
+        // そのまま使うと移動込みで距離が縮まってしまうため、取得判定(update_stars)
+        // だけを直接呼んで、STAR_PICKUP_RADIUSの範囲判定そのものを検証する。
         let mut sim = Simulation::new(Rng::new(701));
         sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0));
         sim.stars.push(Star {
@@ -7760,7 +8013,7 @@ mod tests {
             phase: 0.0,
         });
 
-        sim.update(0.1, w, h);
+        sim.update_stars(0.1);
 
         assert_eq!(sim.stars.len(), 1, "取得範囲外のスターは残るはず");
         assert!(!sim.fish[0].is_invincible());
@@ -7933,6 +8186,99 @@ mod tests {
     }
 
     #[test]
+    fn invincible_common_fish_actively_chases_a_distant_piranha() {
+        // 回帰テスト: 無敵中は捕食者(ピラニア・タコ)を捕食対象にできるだけでなく、
+        // STAR_HUNT_RADIUS以内にいれば実際に追いかける(吸引ベクトルが働く)はず。
+        // 以前はchase_targetの計算が捕食者種(is_predator())限定になっており、
+        // 無敵中の通常種には吸引ベクトルが一切つかず、偶然近づいた時しか
+        // 捕食できない(自分からは追いかけ回さない)バグがあった。
+        let (w, h) = (200, 100);
+        let mut sim = Simulation::new(Rng::new(706));
+        let mut hero = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
+        hero.invincible_timer = 10.0;
+        sim.fish.push(hero);
+        // STAR_HUNT_RADIUS(=PIRANHA_HUNT_RADIUS)以内・STAR_STRIKE_RADIUSより十分遠くに
+        // ピラニアを置く(まだ接触していない距離で、追跡ベクトルの有無だけを見る)。
+        let piranha_x = 40.0 + STAR_HUNT_RADIUS * 0.6;
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, piranha_x, 20.0);
+        piranha.hunger = MAX_HUNGER; // ピラニア自身は捕食モードではない
+        sim.fish.push(piranha);
+
+        sim.update_movement(0.05, w as f64, h as f64 - sand_height(h) as f64);
+
+        assert!(
+            sim.fish[0].vx > 0.0,
+            "無敵の魚は右側にいるピラニアへ向かって速度がつくはず(実際: vx={})",
+            sim.fish[0].vx
+        );
+    }
+
+    #[test]
+    fn invincible_fish_chases_a_piranha_beyond_the_normal_hunt_radius() {
+        // 回帰テスト: 無敵中はスターへの誘引と同程度に徹底的に追いかけ回す仕様のため、
+        // 通常の狩り(STAR_HUNT_RADIUS)を大きく超える距離のピラニアにも吸引ベクトルが
+        // つくはず(距離無制限)。
+        let (w, h) = (400, 200);
+        let mut sim = Simulation::new(Rng::new(707));
+        let mut hero = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
+        hero.invincible_timer = 10.0;
+        sim.fish.push(hero);
+        let piranha_x = 40.0 + STAR_HUNT_RADIUS * 3.0; // 通常のhunt_radiusを大きく超える距離
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, piranha_x, 20.0);
+        piranha.hunger = MAX_HUNGER;
+        sim.fish.push(piranha);
+
+        sim.update_movement(0.05, w as f64, h as f64 - sand_height(h) as f64);
+
+        assert!(
+            sim.fish[0].vx > 0.0,
+            "無敵の魚はSTAR_HUNT_RADIUSを超えた距離のピラニアも追いかけるはず(実際: vx={})",
+            sim.fish[0].vx
+        );
+    }
+
+    #[test]
+    fn fish_that_picks_up_a_star_via_full_update_chases_a_nearby_piranha_closer() {
+        // 単発のupdate_movement呼び出しではなく、実際のゲームループ(sim.update()を
+        // 繰り返し呼ぶ通常のプレイ相当)でも、スター取得後にピラニアとの距離が
+        // 縮まっていくことを確認する回帰テスト。
+        let (w, h) = (200, 100);
+        let mut sim = Simulation::new(Rng::new(707));
+        sim.fish
+            .push(Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0));
+        sim.stars.push(Star {
+            x: 40.0,
+            y: 20.0,
+            life: STAR_LIFETIME,
+            phase: 0.0,
+        });
+        let piranha_x = 40.0 + STAR_HUNT_RADIUS * 0.6;
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, piranha_x, 20.0);
+        piranha.hunger = MAX_HUNGER;
+        sim.fish.push(piranha);
+
+        sim.update(0.1, w, h);
+        assert!(sim.fish[0].is_invincible(), "1tick目でスターを取得して無敵になるはず");
+
+        let dist_after_pickup = (sim.fish[1].x - sim.fish[0].x).abs();
+        for _ in 0..50 {
+            sim.update(0.1, w, h);
+            if sim.fish.len() < 2 {
+                break; // ピラニアを倒せた場合は成功とみなす
+            }
+        }
+        let final_dist = if sim.fish.len() < 2 {
+            0.0
+        } else {
+            (sim.fish[1].x - sim.fish[0].x).abs()
+        };
+        assert!(
+            final_dist < dist_after_pickup,
+            "無敵の魚はピラニアを追いかけて距離が縮まる(または倒す)はず(取得直後: {dist_after_pickup}, 最終: {final_dist})"
+        );
+    }
+
+    #[test]
     fn invincible_common_fish_can_prey_on_an_emerged_octopus() {
         let (w, h) = (80, 40);
         let mut sim = Simulation::new(Rng::new(705));
@@ -7954,6 +8300,35 @@ mod tests {
 
         assert_eq!(sim.fish_count(), 1, "無敵中の金魚が出ているタコを捕食できるはず");
         assert_eq!(sim.fish[0].species, Species::Goldfish);
+    }
+
+    #[test]
+    fn invincible_fish_preying_on_an_octopus_also_clears_its_den() {
+        // 回帰テスト: 無敵中の魚に捕食されて死んだタコのタコつぼが後始末されず
+        // 残ってしまうバグがあった(update_biology・update_crabs側の後始末とは
+        // 別経路である捕食(update_predation)での削除漏れ)。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(962));
+        let mut hero = Fish::new(Species::Goldfish, Stage::Adult, 40.0, 20.0);
+        hero.invincible_timer = 10.0;
+        let (mx, my) = hero.mouth_position();
+        sim.fish.push(hero);
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, mx, my);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = mx;
+        octo.den_y = my;
+        octo.ink_cooldown = 999.0;
+        sim.fish.push(octo);
+        sim.dens.push(Den { x: mx, y: my });
+
+        sim.update(0.01, w, h);
+
+        assert_eq!(sim.fish_count(), 1, "無敵中の金魚がタコを捕食できるはず");
+        assert!(
+            sim.dens.is_empty(),
+            "捕食されて消えたタコのタコつぼも一緒に片付くはず"
+        );
     }
 
     #[test]

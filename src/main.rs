@@ -45,6 +45,7 @@ const SPEED_STEPS: [f64; 7] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
 const SPEED_DEFAULT: usize = 2; // = 1.0倍
 // カーソル(照準)を矢印キー1回でどれだけ動かすか(論理ピクセル)
 const CURSOR_STEP: f64 = 2.0;
+const CURSOR_STEP_SHIFT_MULT: f64 = 4.0; // Shiftを押しながらの高速移動時の倍率
 // 生命残りゲージのセグメント数(スプライト直上の1行に収まる小さいバー)
 const GAUGE_SEGMENTS: usize = 3;
 // 起動スプラッシュ(タイトルロゴ)を自動で消すまでの時間
@@ -412,11 +413,18 @@ fn handle_key(
         return Ok(());
     }
 
+    // Shiftを押しながらのカーソル移動は高速(CURSOR_STEPの何倍か)にする。
+    let cursor_step = if mods.contains(KeyModifiers::SHIFT) {
+        CURSOR_STEP * CURSOR_STEP_SHIFT_MULT
+    } else {
+        CURSOR_STEP
+    };
+
     match code {
         KeyCode::Char('q') | KeyCode::Esc => *running = false,
         KeyCode::Left => {
             let (cx, cy) = clamp_point(
-                ctl.cursor_x - CURSOR_STEP,
+                ctl.cursor_x - cursor_step,
                 ctl.cursor_y,
                 fb.pix_width(),
                 fb.pix_height(),
@@ -426,7 +434,7 @@ fn handle_key(
         }
         KeyCode::Right => {
             let (cx, cy) = clamp_point(
-                ctl.cursor_x + CURSOR_STEP,
+                ctl.cursor_x + cursor_step,
                 ctl.cursor_y,
                 fb.pix_width(),
                 fb.pix_height(),
@@ -437,7 +445,7 @@ fn handle_key(
         KeyCode::Up => {
             let (cx, cy) = clamp_point(
                 ctl.cursor_x,
-                ctl.cursor_y - CURSOR_STEP,
+                ctl.cursor_y - cursor_step,
                 fb.pix_width(),
                 fb.pix_height(),
             );
@@ -447,7 +455,7 @@ fn handle_key(
         KeyCode::Down => {
             let (cx, cy) = clamp_point(
                 ctl.cursor_x,
-                ctl.cursor_y + CURSOR_STEP,
+                ctl.cursor_y + cursor_step,
                 fb.pix_width(),
                 fb.pix_height(),
             );
@@ -1579,7 +1587,7 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "  仰向けに浮き、しばらくして水槽から消えます。",
         "",
         "  基本操作:",
-        "    矢印キー  カーソル移動    f / m   餌 / 薬    t / T   コンコン / トントン",
+        "    矢印キー  カーソル移動(Shift+矢印で高速)    f / m   餌 / 薬    t / T   コンコン / トントン",
         "    p  一時停止/再開    [ / ]  速度変更    ,  設定画面    ?  ヘルプ    q  終了",
         "",
         "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
