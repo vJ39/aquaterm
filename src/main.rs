@@ -1,11 +1,13 @@
 // aquaterm — aquazone 風の端末熱帯魚育成ツール
 //   crossterm による自前ハーフブロック描画。ratatui は使わない。
-//   起動: 前回状態を ~/.config/aquaterm/state.json から復元(無ければ初期状態)。
+//   起動: 前回開いていた水槽を ~/.config/aquaterm/tanks/<名前>.json から復元
+//        (無ければ初期状態。複数水槽の詳細はpersist.rsの冒頭コメント参照)。
 //   キー: 矢印=カーソル移動 / f=餌 / m=薬 / t=ガラスを叩く / T=トントン(引き寄せ) /
 //        p=一時停止 / [ ]=速度 / R=リセット / v=ステータスオーバーレイ表示切替 /
 //        s=効果音ON/OFF / a=自動モード / A=自動魚補充 / +,-=増減 /
 //        S=ピラニア確定追加 / O=タコ確定追加 / D=タコつぼ再配置 / P=藻・水草再配置 / ,=設定 / ?=ヘルプ / q=終了
 //        B=クジラを即座に大爆発させる(デバッグ)
+//        N=水槽選択画面(複数の水槽を名前付きで保存・呼び出し。画面内でnキーで新規水槽名を入力)
 
 mod color;
 mod framebuffer;
@@ -101,6 +103,17 @@ pub(crate) struct Ctl {
     pub(crate) predation_sfx_on: bool, // 捕食(噛みつき)・墨を吐く音
     pub(crate) drop_sfx_on: bool,      // 餌・薬・浄化剤を投下した音
     pub(crate) health_sfx_on: bool,    // 病気発症・回復・空腹発症の通知音
+    // 複数水槽(名前付き保存、新規): 現在開いている水槽名。起動時に
+    // persist::resolve_startup_tank()で決まり、水槽選択画面から切り替わる。
+    current_tank: String,
+    tank_select_on: bool,   // 水槽選択画面(Nキー)を開いているか
+    tank_select_idx: usize, // 水槽選択画面での選択インデックス
+    // 水槽選択画面を開いた時点でのtanks一覧のスナップショット。選択中に
+    // ファイルが増減してもインデックスがズレないよう、開いた時に固定する。
+    tank_select_names: Vec<String>,
+    // 水槽選択画面のnキーから入る、新規水槽名の1行テキスト入力モード。
+    name_input_on: bool,
+    name_input_buf: String,
 }
 
 // 気泡音・捕食音・投下音・状態通知音・通常5種それぞれの生成トグル・餌の量・カニ・
@@ -151,6 +164,10 @@ fn run() -> std::io::Result<()> {
     // persist::restore_into()で上書きする(設定値を次回起動時に覚えておいてほしいという
     // 要望への対応)。Ctlの構築自体はrestore_intoより先に必要(restore_into
     // が&mut Ctlを取るため)。
+    // 複数水槽(名前付き保存): 前回開いていた水槽名を解決する(旧固定パスの
+    // セーブしか無い場合は"default"という名前の水槽として自動移行する)。
+    let (tank_name, saved) = persist::resolve_startup_tank();
+
     let mut ctl = Ctl {
         paused: false,
         speed_idx: SPEED_DEFAULT,
@@ -169,9 +186,17 @@ fn run() -> std::io::Result<()> {
         predation_sfx_on: true, // 既定ON(従来の常時鳴る挙動を維持)
         drop_sfx_on: true,      // 既定ON(従来の常時鳴る挙動を維持)
         health_sfx_on: true,    // 既定ON(従来の常時鳴る挙動を維持)
+        current_tank: tank_name.clone(),
+        tank_select_on: false,
+        tank_select_idx: 0,
+        tank_select_names: Vec::new(),
+        name_input_on: false,
+        name_input_buf: String::new(),
     };
+    // 次回起動時も同じ水槽を開けるよう確定させる(初回起動でまだ
+    // current_tank.txtが無い場合もここで作られる)。
+    let _ = persist::save_current_tank_name(&tank_name);
 
-    let saved = persist::load();
     let mut help = saved.is_none(); // 初回のみヘルプ自動表示
     match saved {
         Some(state) => {
@@ -306,11 +331,16 @@ fn run() -> std::io::Result<()> {
             if ctl.settings_on {
                 draw_settings_panel(&mut out, &ctl, &sim, fb.pix_width(), fb.pix_height(), cols_u, cell_rows)?;
             }
+            // 水槽選択画面(Nキー): 設定画面と同じくサイドパネルとして重ねて描く。
+            if ctl.tank_select_on {
+                draw_tank_select_panel(&mut out, &ctl, cols_u, cell_rows)?;
+            }
             out.flush()?;
         }
     }
 
-    let _ = persist::save(&sim, &ctl);
+    let _ = persist::save_named(&sim, &ctl, &ctl.current_tank);
+    let _ = persist::save_current_tank_name(&ctl.current_tank);
     execute_teardown(&mut out)?;
     Ok(())
 }
@@ -379,6 +409,79 @@ fn handle_key(
             sim.reset(fb.pix_width(), fb.pix_height());
         } else {
             sim.set_message("リセットを取り消しました");
+        }
+        return Ok(());
+    }
+
+    // 水槽選択画面のnキーから入る、新規水槽名の1行テキスト入力モード
+    // (これまで存在しなかったシンプルなテキスト入力: 文字入力・Backspaceで削除・
+    // Enterで確定・Escでキャンセル)。確定した名前で新規水槽を作成(または既存の
+    // 同名水槽への切替)する。他のキーは何もしない。
+    if ctl.name_input_on {
+        match code {
+            KeyCode::Esc => {
+                ctl.name_input_on = false;
+                ctl.name_input_buf.clear();
+            }
+            KeyCode::Backspace => {
+                ctl.name_input_buf.pop();
+            }
+            KeyCode::Char(c) => {
+                try_push_name_input_char(&mut ctl.name_input_buf, c);
+            }
+            KeyCode::Enter => {
+                let name = persist::sanitize_tank_name(&ctl.name_input_buf);
+                if !name.is_empty() {
+                    switch_or_create_tank(sim, fb, ctl, &name);
+                    ctl.tank_select_on = false;
+                    fb.force_full_redraw();
+                    queue!(out, Clear(ClearType::All))?;
+                }
+                ctl.name_input_on = false;
+                ctl.name_input_buf.clear();
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    // 水槽選択画面(Nキー): 上下で選択、Enterで切替(現在の水槽をまず保存してから
+    // 選択した水槽を読み込む)、nで新規水槽名の入力モードへ、Escで閉じる。
+    // 他のキーは何もしない(誤操作で水槽側の操作に伝わらないようにする)。
+    if ctl.tank_select_on {
+        match code {
+            KeyCode::Up => {
+                if !ctl.tank_select_names.is_empty() {
+                    ctl.tank_select_idx = if ctl.tank_select_idx == 0 {
+                        ctl.tank_select_names.len() - 1
+                    } else {
+                        ctl.tank_select_idx - 1
+                    };
+                }
+            }
+            KeyCode::Down => {
+                if !ctl.tank_select_names.is_empty() {
+                    ctl.tank_select_idx = (ctl.tank_select_idx + 1) % ctl.tank_select_names.len();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(name) = ctl.tank_select_names.get(ctl.tank_select_idx).cloned() {
+                    switch_to_existing_tank(sim, fb, ctl, &name);
+                }
+                ctl.tank_select_on = false;
+                fb.force_full_redraw();
+                queue!(out, Clear(ClearType::All))?;
+            }
+            KeyCode::Char('n') => {
+                ctl.name_input_on = true;
+                ctl.name_input_buf.clear();
+            }
+            KeyCode::Esc => {
+                ctl.tank_select_on = false;
+                fb.force_full_redraw();
+                queue!(out, Clear(ClearType::All))?;
+            }
+            _ => {}
         }
         return Ok(());
     }
@@ -637,12 +740,83 @@ fn handle_key(
             ctl.settings_on = true;
             ctl.settings_selected = 0;
         }
+        // 複数水槽(名前付き保存、新規): 水槽選択画面を開く。開くたびに一覧を
+        // 読み直し、カーソルは現在開いている水槽の位置に合わせる。
+        KeyCode::Char('N') => {
+            ctl.tank_select_on = true;
+            ctl.tank_select_names = persist::list_tanks();
+            // 現在の水槽がまだ一度も保存されておらず一覧に出てこない場合でも
+            // (新規作成直後等)選べるように、一覧に含めておく。
+            if !ctl.tank_select_names.iter().any(|n| n == &ctl.current_tank) {
+                ctl.tank_select_names.push(ctl.current_tank.clone());
+                ctl.tank_select_names.sort();
+            }
+            ctl.tank_select_idx = ctl
+                .tank_select_names
+                .iter()
+                .position(|n| n == &ctl.current_tank)
+                .unwrap_or(0);
+        }
         KeyCode::Char('?') => {
             *help = true;
         }
         _ => {}
     }
     Ok(())
+}
+
+// 名前入力モードでの1文字入力を試みる。ファイル名として無効な文字(サニタイズで
+// 除去される文字。パス区切り・空白・引用符・制御文字等)や、文字数上限
+// (persist::TANK_NAME_MAX_CHARS)を超える入力は黙って無視する(バッファは変化
+// しない)。表示中の文字列がそのまま保存される名前と一致するように、入力の
+// 時点でフィルタする。
+fn try_push_name_input_char(buf: &mut String, c: char) {
+    if buf.chars().count() >= persist::TANK_NAME_MAX_CHARS {
+        return;
+    }
+    if !persist::sanitize_tank_name(&c.to_string()).is_empty() {
+        buf.push(c);
+    }
+}
+
+// 水槽選択画面で既存の水槽への切替を確定する(要件4): 現在の水槽をまず保存して
+// から、選んだ水槽を読み込む。同じ水槽を選んだだけなら何もしない。
+fn switch_to_existing_tank(sim: &mut Simulation, fb: &FrameBuffer, ctl: &mut Ctl, name: &str) {
+    if ctl.current_tank == name {
+        return;
+    }
+    let _ = persist::save_named(sim, ctl, &ctl.current_tank);
+    match persist::load_named(name) {
+        Some(state) => {
+            persist::restore_into(sim, ctl, state);
+            // 旧セーブ(観賞用エンティティが無いもの)を読んだ場合の補充。
+            sim.ensure_decorative_entities(fb.pix_width(), fb.pix_height());
+            ctl.current_tank = name.to_string();
+            let _ = persist::save_current_tank_name(name);
+            sim.set_message(format!("水槽「{name}」に切替"));
+        }
+        None => {
+            sim.set_message(format!("水槽「{name}」の読み込みに失敗しました"));
+        }
+    }
+}
+
+// 水槽選択画面のnキー(新規水槽名の入力)で確定した名前を反映する。既に同名の
+// 水槽が存在する場合は、空データで黙って上書きするのではなくその水槽への切替
+// として扱う(要件6と同じ「ユーザーの進行中データを黙って消さない」という
+// 考え方)。存在しない名前なら、現在の水槽をまず保存してから、新しい空の水槽を
+// 作成して切り替える。
+fn switch_or_create_tank(sim: &mut Simulation, fb: &mut FrameBuffer, ctl: &mut Ctl, name: &str) {
+    if persist::list_tanks().iter().any(|n| n == name) {
+        switch_to_existing_tank(sim, fb, ctl, name);
+        return;
+    }
+    let _ = persist::save_named(sim, ctl, &ctl.current_tank);
+    sim.reset(fb.pix_width(), fb.pix_height());
+    ctl.current_tank = name.to_string();
+    let _ = persist::save_named(sim, ctl, name);
+    let _ = persist::save_current_tank_name(name);
+    sim.set_message(format!("新規水槽「{name}」を作成"));
 }
 
 // 魚のスプライト1ピクセルの色に、空腹度(腹ぺこは薄暗く)と病気(まだら・くすみ)を反映
@@ -1552,7 +1726,7 @@ fn draw_status_bar(
         // (捕食する種ばかりだと魚がいなくなるという指摘への対応の新規トグル)。
         let auto_replenish = if ctl.auto_replenish_on { "ON" } else { "OFF" };
         let base = format!(
-            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  補充 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [M]肉餌 [t]コンコン [T]トントン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [A]補充 [+/-]増減 [S]ピラニア [O]タコ [D]タコつぼ [P]水草 [,]設定 [?]ヘルプ [q]終了 ",
+            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  補充 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [M]肉餌 [t]コンコン [T]トントン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [A]補充 [+/-]増減 [S]ピラニア [O]タコ [D]タコつぼ [P]水草 [,]設定 [N]水槽 [?]ヘルプ [q]終了 ",
             sim.fish_count(),
             cap,
             sim.sick_count(),
@@ -1912,6 +2086,62 @@ fn draw_settings_panel(
     out.flush()
 }
 
+// 水槽選択画面(Nキー、複数水槽の新規): 設定画面と同じ考え方でサイドメニュー
+// として画面右側に固定幅で重ねて描く(水槽の描画は止めない)。name_input_on
+// (nキーで入る新規水槽名の入力モード)の間は、一覧の代わりに入力欄を表示する。
+fn draw_tank_select_panel(out: &mut Stdout, ctl: &Ctl, cols: usize, rows: usize) -> std::io::Result<()> {
+    if cols == 0 || rows == 0 {
+        return Ok(());
+    }
+    let panel_w = 34usize.min(cols);
+    let panel_col = cols - panel_w;
+    let bg = "\x1b[48;2;18;26;38m";
+    let fg = "\x1b[38;2;220;235;245m";
+    let dim_fg = "\x1b[38;2;170;190;205m";
+    let selected_fg = "\x1b[38;2;255;230;140m";
+
+    let mut lines: Vec<(String, &str)> = Vec::new();
+    if ctl.name_input_on {
+        lines.push((" 新規水槽".to_string(), fg));
+        lines.push((String::new(), fg));
+        lines.push((" 名前を入力:".to_string(), fg));
+        lines.push((format!(" {}▏", ctl.name_input_buf), selected_fg));
+        lines.push((String::new(), fg));
+        lines.push((" 英数字・- ・_ のみ使用可".to_string(), dim_fg));
+        lines.push((" Enter 確定 / Esc キャンセル".to_string(), dim_fg));
+    } else {
+        lines.push((" 水槽選択".to_string(), fg));
+        lines.push((String::new(), fg));
+        if ctl.tank_select_names.is_empty() {
+            lines.push((" (保存済みの水槽がありません)".to_string(), dim_fg));
+        }
+        for (i, name) in ctl.tank_select_names.iter().enumerate() {
+            let marker = if i == ctl.tank_select_idx { "▶" } else { " " };
+            let current = if name == &ctl.current_tank { " (現在)" } else { "" };
+            let color = if i == ctl.tank_select_idx { selected_fg } else { fg };
+            lines.push((format!(" {marker}{name}{current}"), color));
+        }
+        lines.push((String::new(), fg));
+        lines.push((" ↑↓ 選択  Enter 切替".to_string(), dim_fg));
+        lines.push((" n 新規水槽名を入力".to_string(), dim_fg));
+        lines.push((" Esc 閉じる".to_string(), dim_fg));
+    }
+
+    for row in 0..rows {
+        let (text, color) = lines
+            .get(row)
+            .map(|(t, c)| (t.as_str(), *c))
+            .unwrap_or(("", fg));
+        let padded = fit_width(text, panel_w);
+        queue!(
+            out,
+            MoveTo(panel_col as u16, row as u16),
+            Print(format!("{bg}{color}{padded}\x1b[0m"))
+        )?;
+    }
+    out.flush()
+}
+
 fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> {
     // ヘルプが縦長すぎて図鑑が見切れるという指摘への対応で、キー操作を
     // 詳細な1キー1行から、関連キーをまとめた行に圧縮した(縦の行数を減らし、
@@ -1926,7 +2156,9 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "",
         "  基本操作:",
         "    矢印キー  カーソル移動(Shift+矢印で高速)    f / m   餌 / 薬    t / T   コンコン / トントン",
-        "    p  一時停止/再開    [ / ]  速度変更    ,  設定画面    ?  ヘルプ    q  終了",
+        "    p  一時停止/再開    [ / ]  速度変更    ,  設定画面    N  水槽選択    ?  ヘルプ    q  終了",
+        "",
+        "  N(水槽選択画面): ↑↓ 選択  Enter 切替(現在の水槽を保存してから読込)  n 新規水槽名を入力  Esc 閉じる",
         "",
         "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
         "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / C 浄化剤 / D タコつぼ / P 水草",
@@ -2227,6 +2459,12 @@ mod tests {
             predation_sfx_on: true,
             drop_sfx_on: true,
             health_sfx_on: true,
+            current_tank: "default".to_string(),
+            tank_select_on: false,
+            tank_select_idx: 0,
+            tank_select_names: Vec::new(),
+            name_input_on: false,
+            name_input_buf: String::new(),
         }
     }
 
@@ -2307,5 +2545,160 @@ mod tests {
         ] {
             assert!(sfx_enabled_for(&ctl, ev), "{ev:?}が鳴らないのは既定値からのはず");
         }
+    }
+
+    // --- 複数水槽(名前付き保存)のUI挙動 ------------------------------------
+    // handle_key経由のテストは、実際の~/.config/aquatermへの書き込み(persist::
+    // save_named等、実HOME基準の公開API)を発生させる分岐(名前確定・水槽切替の
+    // Enter確定・水槽選択画面を閉じるEsc)を避け、それ以外の安全な分岐(文字入力・
+    // Backspace・空バッファでのEnterキャンセル・上下ナビゲーション)だけを検証する。
+    // 実ファイルを触る移行/保存/読み込みロジック自体はpersist.rs側の`*_in`関数で
+    // 一時ディレクトリを使って検証済み。
+    fn test_sim_fb_out() -> (Simulation, FrameBuffer, Stdout) {
+        (Simulation::new(Rng::new(1)), FrameBuffer::new(20, 10), std::io::stdout())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn press(
+        code: KeyCode,
+        sim: &mut Simulation,
+        fb: &mut FrameBuffer,
+        ctl: &mut Ctl,
+        out: &mut Stdout,
+    ) {
+        let mut splash = false;
+        let mut help = false;
+        let mut running = true;
+        handle_key(code, KeyModifiers::NONE, sim, fb, ctl, &mut splash, &mut help, &mut running, out)
+            .expect("handle_keyはこれらの分岐でErrを返さないはず");
+    }
+
+    #[test]
+    fn try_push_name_input_char_rejects_invalid_chars_and_respects_max_len() {
+        let mut buf = String::new();
+        try_push_name_input_char(&mut buf, 'a');
+        try_push_name_input_char(&mut buf, ' '); // 空白は無効
+        try_push_name_input_char(&mut buf, '/'); // パス区切りは無効
+        try_push_name_input_char(&mut buf, '_');
+        assert_eq!(buf, "a_", "無効な文字は追加されないはず");
+
+        let mut full = "x".repeat(persist::TANK_NAME_MAX_CHARS);
+        try_push_name_input_char(&mut full, 'y');
+        assert_eq!(
+            full.chars().count(),
+            persist::TANK_NAME_MAX_CHARS,
+            "上限文字数を超えて追加されないはず"
+        );
+    }
+
+    #[test]
+    fn name_input_mode_char_keys_append_valid_chars_and_ignore_invalid_ones() {
+        let (mut sim, mut fb, mut out) = test_sim_fb_out();
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.name_input_on = true;
+
+        for c in ['r', 'e', 'e', 'f', '-', '2'] {
+            press(KeyCode::Char(c), &mut sim, &mut fb, &mut ctl, &mut out);
+        }
+        assert_eq!(ctl.name_input_buf, "reef-2");
+
+        // 無効な文字(空白・記号)は無視され、バッファも入力モードも変わらない
+        press(KeyCode::Char(' '), &mut sim, &mut fb, &mut ctl, &mut out);
+        press(KeyCode::Char('/'), &mut sim, &mut fb, &mut ctl, &mut out);
+        assert_eq!(ctl.name_input_buf, "reef-2", "無効な文字は追加されないはず");
+        assert!(ctl.name_input_on, "文字入力中は入力モードを維持するはず");
+    }
+
+    #[test]
+    fn name_input_mode_backspace_removes_last_char() {
+        let (mut sim, mut fb, mut out) = test_sim_fb_out();
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.name_input_on = true;
+        ctl.name_input_buf = "abc".to_string();
+
+        press(KeyCode::Backspace, &mut sim, &mut fb, &mut ctl, &mut out);
+        assert_eq!(ctl.name_input_buf, "ab");
+        press(KeyCode::Backspace, &mut sim, &mut fb, &mut ctl, &mut out);
+        press(KeyCode::Backspace, &mut sim, &mut fb, &mut ctl, &mut out);
+        assert_eq!(ctl.name_input_buf, "", "空でのBackspaceはpanicせず空のままのはず");
+    }
+
+    #[test]
+    fn name_input_mode_esc_cancels_and_clears_buffer() {
+        let (mut sim, mut fb, mut out) = test_sim_fb_out();
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.name_input_on = true;
+        ctl.name_input_buf = "abc".to_string();
+
+        press(KeyCode::Esc, &mut sim, &mut fb, &mut ctl, &mut out);
+        assert!(!ctl.name_input_on, "Escで入力モードを閉じるはず");
+        assert!(ctl.name_input_buf.is_empty(), "Escでバッファをクリアするはず");
+    }
+
+    #[test]
+    fn name_input_mode_enter_with_blank_buffer_cancels_without_touching_tank_state() {
+        // 表示上は空白のみ(サニタイズすると空文字列になる)入力でEnterした場合、
+        // 水槽の新規作成/切替は行わずに入力モードだけ閉じる(要件6と同じ「黙って
+        // 消さない」考え方の裏返しで、無効な確定で余計な副作用を起こさない)。
+        let (mut sim, mut fb, mut out) = test_sim_fb_out();
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.tank_select_on = true;
+        ctl.name_input_on = true;
+        ctl.name_input_buf = "   ".to_string();
+        let original_tank = ctl.current_tank.clone();
+
+        press(KeyCode::Enter, &mut sim, &mut fb, &mut ctl, &mut out);
+
+        assert!(!ctl.name_input_on, "空名では入力モードを閉じるはず");
+        assert!(ctl.name_input_buf.is_empty());
+        assert!(ctl.tank_select_on, "空名の確定では水槽選択画面自体は閉じないはず");
+        assert_eq!(ctl.current_tank, original_tank, "空名では水槽の切替を行わないはず");
+    }
+
+    #[test]
+    fn tank_select_mode_up_down_wrap_around_selection() {
+        let (mut sim, mut fb, mut out) = test_sim_fb_out();
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.tank_select_on = true;
+        ctl.tank_select_names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        ctl.tank_select_idx = 0;
+
+        press(KeyCode::Up, &mut sim, &mut fb, &mut ctl, &mut out);
+        assert_eq!(ctl.tank_select_idx, 2, "先頭でのUpは末尾へ折り返すはず");
+
+        press(KeyCode::Down, &mut sim, &mut fb, &mut ctl, &mut out);
+        assert_eq!(ctl.tank_select_idx, 0, "末尾でのDownは先頭へ折り返すはず");
+
+        press(KeyCode::Down, &mut sim, &mut fb, &mut ctl, &mut out);
+        assert_eq!(ctl.tank_select_idx, 1);
+    }
+
+    #[test]
+    fn tank_select_mode_navigation_on_empty_list_does_not_panic_or_move() {
+        let (mut sim, mut fb, mut out) = test_sim_fb_out();
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.tank_select_on = true;
+        ctl.tank_select_names = Vec::new();
+
+        press(KeyCode::Up, &mut sim, &mut fb, &mut ctl, &mut out);
+        assert_eq!(ctl.tank_select_idx, 0);
+        press(KeyCode::Down, &mut sim, &mut fb, &mut ctl, &mut out);
+        assert_eq!(ctl.tank_select_idx, 0);
+    }
+
+    #[test]
+    fn tank_select_mode_n_key_enters_name_input_mode_with_a_clean_buffer() {
+        let (mut sim, mut fb, mut out) = test_sim_fb_out();
+        let mut ctl = test_ctl_all_sfx_on();
+        ctl.tank_select_on = true;
+        ctl.name_input_buf = "leftover".to_string(); // 前回の入力の残り
+
+        press(KeyCode::Char('n'), &mut sim, &mut fb, &mut ctl, &mut out);
+
+        assert!(ctl.name_input_on, "nキーで新規水槽名の入力モードに入るはず");
+        assert!(
+            ctl.name_input_buf.is_empty(),
+            "新規入力モードに入る時は前回の残りをクリアするはず"
+        );
     }
 }
