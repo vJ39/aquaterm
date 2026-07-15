@@ -8245,15 +8245,19 @@ mod tests {
         // 水槽は上下の壁からどちらのグループも十分離れる高さ(200)にし、y=60/140は
         // 壁際での反射・回避行動が群ごとに偏って平均速度の比較を乱さないようにするための
         // 配置(単に上下に分けるだけの60px水槽だと、壁に近い側が壁回避の分だけ余分に
-        // 速度が落ち、稚魚本来の機敏さの差が埋もれてしまう)。
+        // 速度が落ち、稚魚本来の機敏さの差が埋もれてしまう)。x方向も同様の理由で
+        // 左の壁から十分離す(x=100〜140。壁際の群れ滞留対策で反発がmarginの3.5倍
+        // 手前から立ち上がるようになったため、壁際に近いx=5〜45だと成魚のサイズ基準
+        // マージン(size_x_margin)がより広く効いて反発の影響を余分に受けてしまい、
+        // 稚魚本来の機敏さの差が埋もれていた)。
         let mut sim = Simulation::new(Rng::new(600));
         for i in 0..40 {
-            let mut f = Fish::new(Species::Neon, Stage::Fry, 5.0 + i as f64, 60.0);
+            let mut f = Fish::new(Species::Neon, Stage::Fry, 100.0 + i as f64, 60.0);
             f.hunger = 55.0; // 満腹判定(60)未満に固定し、成長(Fry→Adult)が起きないようにする
             sim.fish.push(f);
         }
         for i in 0..40 {
-            let mut f = Fish::new(Species::Neon, Stage::Adult, 5.0 + i as f64, 140.0);
+            let mut f = Fish::new(Species::Neon, Stage::Adult, 100.0 + i as f64, 140.0);
             f.hunger = 55.0; // 稚魚側と空腹度の条件を揃える(spd_multを同一にする)
             sim.fish.push(f);
         }
