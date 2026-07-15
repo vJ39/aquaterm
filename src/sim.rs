@@ -252,7 +252,7 @@ pub const WHALE_EXPLOSION_DELAY: f64 = 60.0;
 // 通常の血飛沫より一段濃い赤にする)。
 pub const WHALE_EXPLOSION_GORE_PARTICLE_COUNT: usize = 60; // 通常の血飛沫(10個)の6倍散らす
 pub const WHALE_EXPLOSION_GORE_SPREAD_RADIUS: f64 = 30.0; // 通常(6.0)の5倍広い範囲に飛び散る
-pub const WHALE_EXPLOSION_GORE_LIFETIME: f64 = 5.0; // 通常(1.6秒)より長く残る
+pub const WHALE_EXPLOSION_GORE_LIFETIME: f64 = 20.0; // 通常(1.6秒)より長く残る
 // クジラの爆発地点に残る巨大な血の滲み。通常の血の滲み(BLOOD_STAIN_MAX_RADIUS=20.0)
 // より一段大きく・濃い赤にした専用バリエーションで、main.rs側で別のVec
 // (whale_gore_stains)として描画する(ink_clouds/purify_bloomsと同じ、専用の
