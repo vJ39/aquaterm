@@ -203,6 +203,12 @@ pub const CURRENT_STREAK_SPAWN_INTERVAL_MIN: f64 = 1.2;
 pub const CURRENT_STREAK_SPAWN_INTERVAL_MAX: f64 = 2.5;
 pub const CURRENT_STREAK_LIFETIME: f64 = 3.5;
 
+// 気泡音(SfxEvent::Bubble)の間引き間隔。見た目の気泡発生とは別に、鳴らす頻度だけを
+// さらに疎にするためのタイマー(update_bubbles参照)。旧値(3.0〜6.0秒)は鳴りすぎる
+// との指摘を受けて2倍に広げた。
+pub const BUBBLE_SOUND_INTERVAL_MIN: f64 = 6.0;
+pub const BUBBLE_SOUND_INTERVAL_MAX: f64 = 12.0;
+
 // --- 死亡演出パラメータ ---
 // 死んだ魚は、体内のガスによる浮力(時間とともに減衰する)と重力・水の抵抗を
 // 簡易的に力学計算し、「最初は浮いて漂うが、やがて浮力が失われて沈み、水底の
@@ -4845,7 +4851,9 @@ impl Simulation {
         // 気泡音は見た目の気泡発生よりさらに間引く(毎回鳴らすとうるさいため)
         self.bubble_sound_timer -= dt;
         if self.bubble_sound_timer <= 0.0 {
-            self.bubble_sound_timer = self.rng.range(3.0, 6.0);
+            self.bubble_sound_timer = self
+                .rng
+                .range(BUBBLE_SOUND_INTERVAL_MIN, BUBBLE_SOUND_INTERVAL_MAX);
             self.sound_events.push(SfxEvent::Bubble);
         }
         for i in 0..self.bubbles.len() {
@@ -8126,10 +8134,11 @@ mod tests {
 
     #[test]
     fn bubble_sound_eventually_fires_but_is_throttled() {
-        // 気泡音は見た目の気泡よりさらに間引かれる(3〜6秒に1回程度)。
+        // 気泡音は見た目の気泡よりさらに間引かれる
+        // (BUBBLE_SOUND_INTERVAL_MIN〜BUBBLE_SOUND_INTERVAL_MAX秒に1回程度)。
         // タイマー初期値が0のため起動直後の最初のtickで1回鳴るのは仕様通り。
-        // その直後はまだ次の間引き時間(3〜6秒)に達していないので鳴らず、
-        // 十分な時間(10秒)経てば再び鳴ることを確認する。
+        // その直後はまだ次の間引き時間に達していないので鳴らず、
+        // 十分な時間(最大間隔より長く)経てば再び鳴ることを確認する。
         let mut sim = Simulation::new(Rng::new(73));
         sim.update(0.1, 80, 40); // 起動直後の最初のtickで1回鳴る(仕様通り)
         assert!(
@@ -8147,14 +8156,39 @@ mod tests {
         );
 
         let mut saw_bubble = false;
-        for _ in 0..90 {
-            sim.update(0.1, 80, 40); // さらに9秒(合計10秒)
+        // BUBBLE_SOUND_INTERVAL_MAX(12秒)より確実に長く待つ(合計約13秒)。
+        for _ in 0..130 {
+            sim.update(0.1, 80, 40);
             if sim.sound_events.contains(&SfxEvent::Bubble) {
                 saw_bubble = true;
                 break;
             }
         }
         assert!(saw_bubble, "十分な時間放置すれば気泡音が再び鳴るはず");
+    }
+
+    #[test]
+    fn bubble_sound_interval_is_sparser_than_visual_bubble_spawn() {
+        // 気泡音の間引き間隔(BUBBLE_SOUND_INTERVAL_MIN/MAX)が、実装時の意図通り
+        // 疎(間隔が広い)であることを固定値で検証する。将来また鳴りすぎ/鳴らなさすぎ
+        // に調整した際、意図せず元の頻度(3.0〜6.0秒)に戻っていないかを検出する。
+        assert_eq!(BUBBLE_SOUND_INTERVAL_MIN, 6.0);
+        assert_eq!(BUBBLE_SOUND_INTERVAL_MAX, 12.0);
+        // 見た目の気泡発生(0.3〜0.9秒に1回)よりも気泡音は明確に疎であるはず。
+        assert!(BUBBLE_SOUND_INTERVAL_MIN > 0.9);
+    }
+
+    #[test]
+    fn bubble_sound_average_interval_roughly_doubled_from_previous_value() {
+        // 旧仕様(3.0〜6.0秒、平均4.5秒)に対して、新仕様(6.0〜12.0秒、平均9.0秒)は
+        // 平均で概ね2倍疎になっていることを確認する(「1.5〜2倍」という要求に対して
+        // 十分な変化量になっているかのリグレッションガード)。
+        let old_avg = (3.0 + 6.0) / 2.0;
+        let new_avg = (BUBBLE_SOUND_INTERVAL_MIN + BUBBLE_SOUND_INTERVAL_MAX) / 2.0;
+        assert!(
+            new_avg >= old_avg * 1.5,
+            "新しい平均間隔({new_avg})は旧平均({old_avg})の1.5倍以上であるべき"
+        );
     }
 
     #[test]
@@ -8208,39 +8242,50 @@ mod tests {
     fn fry_moves_faster_on_average_than_adult_in_normal_swimming() {
         // 統計的確認: 特別なトリガー(空腹・逃走等)が無い通常の遊泳では、
         // 十分な匹数・時間で見ると稚魚の平均速度(機敏さ)は成魚より高いはず。
+        // 水槽は上下の壁からどちらのグループも十分離れる高さ(200)にし、y=60/140は
+        // 壁際での反射・回避行動が群ごとに偏って平均速度の比較を乱さないようにするための
+        // 配置(単に上下に分けるだけの60px水槽だと、壁に近い側が壁回避の分だけ余分に
+        // 速度が落ち、稚魚本来の機敏さの差が埋もれてしまう)。
         let mut sim = Simulation::new(Rng::new(600));
         for i in 0..40 {
-            let mut f = Fish::new(Species::Neon, Stage::Fry, 5.0 + i as f64, 10.0);
+            let mut f = Fish::new(Species::Neon, Stage::Fry, 5.0 + i as f64, 60.0);
             f.hunger = 55.0; // 満腹判定(60)未満に固定し、成長(Fry→Adult)が起きないようにする
             sim.fish.push(f);
         }
         for i in 0..40 {
-            let mut f = Fish::new(Species::Neon, Stage::Adult, 5.0 + i as f64, 30.0);
+            let mut f = Fish::new(Species::Neon, Stage::Adult, 5.0 + i as f64, 140.0);
             f.hunger = 55.0; // 稚魚側と空腹度の条件を揃える(spd_multを同一にする)
             sim.fish.push(f);
         }
+
+        let (mut fry_speed_sum, mut fry_n) = (0.0, 0usize);
+        let (mut adult_speed_sum, mut adult_n) = (0.0, 0usize);
         for _ in 0..100 {
             // 100 * 0.1 = 10秒。GROW_TIMEより十分短く、稚魚が成魚化しない範囲で
             // ドラッグによる速度の定常状態には十分な時間。
             for f in &mut sim.fish {
                 f.hunger = 55.0; // 空腹度を維持(成長・腹ぺこ化を防ぐ)
             }
-            sim.update(0.1, 800, 60);
-        }
-
-        let (mut fry_speed_sum, mut fry_n) = (0.0, 0usize);
-        let (mut adult_speed_sum, mut adult_n) = (0.0, 0usize);
-        for f in &sim.fish {
-            if f.dead {
-                continue;
-            }
-            let speed = (f.vx * f.vx + f.vy * f.vy).sqrt();
-            if f.stage == Stage::Fry {
-                fry_speed_sum += speed;
-                fry_n += 1;
-            } else {
-                adult_speed_sum += speed;
-                adult_n += 1;
+            sim.update(0.1, 800, 200);
+            // 最終tickだけのスナップショットだと、低頻度のランダムダッシュ
+            // (DASH_CHANCE_PER_SEC、期待間隔約50秒に1回)がたまたまどちらの
+            // グループに多く乗るかで平均が揺れてしまう。「十分な匹数・時間で見ると」
+            // という本来の意図に合わせ、毎tickの速度を積算して時間方向にも平均化する。
+            // ダッシュ中の個体はランダムダッシュ自体の効果(別テスト
+            // random_dash_eventually_boosts_speed_during_normal_swimming で検証済み)を
+            // 測ってしまうため、ここでの「通常の遊泳」の速度比較からは除外する。
+            for f in &sim.fish {
+                if f.dead || f.dash_timer > 0.0 {
+                    continue;
+                }
+                let speed = (f.vx * f.vx + f.vy * f.vy).sqrt();
+                if f.stage == Stage::Fry {
+                    fry_speed_sum += speed;
+                    fry_n += 1;
+                } else {
+                    adult_speed_sum += speed;
+                    adult_n += 1;
+                }
             }
         }
         assert!(fry_n > 0 && adult_n > 0, "稚魚・成魚どちらも残っているはず");

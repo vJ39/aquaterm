@@ -18,8 +18,10 @@
 
 #[cfg(feature = "sound")]
 mod real {
+    use crate::rng::Rng;
     use crate::sim::SfxEvent;
     use rodio::{DeviceSinkBuilder, MixerDeviceSink, Source};
+    use std::cell::RefCell;
     use std::num::NonZero;
     use std::time::Duration;
 
@@ -118,11 +120,34 @@ mod real {
     // (開始周波数, 終了周波数, 音の長さms, 減衰の速さ, 音量, 開始までの遅延ms)
     type ToneSpec = (f32, f32, u64, f32, f32, u64);
 
+    // 気泡音のバリエーション一覧。単一のスイープパターンだけだと毎回同じ音に聞こえて
+    // 単調になるため、周波数帯・持続時間・減衰・音量を振った複数パターンを用意し、
+    // 鳴らすたびにランダムに1つを選ぶ(choose_bubble_variant参照)。いずれも低め→高めへ
+    // 短くピッチアップするスイープ・音量小さめという方向性は共通にして、気泡音として
+    // 聞き分けられる範囲に収めている。
+    const BUBBLE_VARIANTS: [ToneSpec; 5] = [
+        (700.0, 1300.0, 55, 45.0, 0.09, 0), // 元の音: 中庸な高さ・速い減衰
+        (420.0, 850.0, 75, 28.0, 0.10, 0),  // 低め・やや長め・ゆるい減衰(大きい気泡)
+        (1000.0, 1750.0, 40, 62.0, 0.08, 0), // 高め・短め・速い減衰(小さい気泡)
+        (600.0, 1080.0, 60, 36.0, 0.095, 0), // 中低音・中程度の減衰
+        (880.0, 1550.0, 48, 50.0, 0.085, 0), // 中高音・やや速い減衰
+    ];
+
+    // 気泡音のバリエーションを1つランダムに選ぶ。RNGを外から渡す形にして、実際の音声
+    // 再生(rodioのシンク)なしに選択ロジックだけを単体テストできるようにしている。
+    fn choose_bubble_variant(rng: &mut Rng) -> ToneSpec {
+        let idx = rng.range_usize(0, BUBBLE_VARIANTS.len() - 1);
+        BUBBLE_VARIANTS[idx]
+    }
+
     // イベントごとの音色。複数指定した場合は同時に鳴らし始める(delay_ms で時間差をつけられる)。
-    fn tones_for(event: SfxEvent) -> Vec<ToneSpec> {
+    // rng は気泡音のようにイベント自体に複数バリエーションを持たせる場合にのみ使う
+    // (他のイベントは固定の音色のため未使用)。
+    fn tones_for(event: SfxEvent, rng: &mut Rng) -> Vec<ToneSpec> {
         match event {
-            // 気泡: 低め→高めへの短いピッチアップスイープ、音量小さめ
-            SfxEvent::Bubble => vec![(700.0, 1300.0, 55, 45.0, 0.09, 0)],
+            // 気泡: BUBBLE_VARIANTSからランダムに1つ選ぶ(低め→高めへの短いピッチアップ
+            // スイープ、音量小さめという方向性は全パターン共通)
+            SfxEvent::Bubble => vec![choose_bubble_variant(rng)],
             // 餌: 高め→低めへ短時間で下降するピッチスイープ+速い減衰(「ぽちゃん」という水滴の質感)。
             // 音の余韻が長く、もっと短く乾いた音にすべきという指摘を受けて、
             // 持続時間・減衰(decay)をさらに切り詰めた(旧70ms・decay32.0)。
@@ -186,6 +211,10 @@ mod real {
     pub struct SoundEngine {
         // MixerDeviceSink 自体を保持し続けないと(Drop で)出力ストリームが止まってしまうため保持する。
         sink: Option<MixerDeviceSink>,
+        // 気泡音などのバリエーション選択専用のRNG。sim.rs側のRNG(決定的・シミュレーション
+        // 状態の再現性が必要)とは無関係な、鳴らす音を毎回変える演出用の乱数なので、
+        // 独立して保持する(RefCell: play()は&selfのため内部で可変に使う)。
+        rng: RefCell<Rng>,
     }
 
     impl SoundEngine {
@@ -195,10 +224,16 @@ mod real {
                     // デバイス切断等でこのシンクが drop される際、既定だと stderr にログを
                     // 出す仕様になっている。ターミナルUIの邪魔になるため無効化する。
                     sink.log_on_drop(false);
-                    SoundEngine { sink: Some(sink) }
+                    SoundEngine {
+                        sink: Some(sink),
+                        rng: RefCell::new(Rng::from_time()),
+                    }
                 }
                 // オーディオ出力デバイスが無い/初期化失敗。SEなしで動作を続ける。
-                Err(_) => SoundEngine { sink: None },
+                Err(_) => SoundEngine {
+                    sink: None,
+                    rng: RefCell::new(Rng::from_time()),
+                },
             }
         }
 
@@ -208,7 +243,8 @@ mod real {
                 return;
             };
             let mixer = sink.mixer();
-            for (start_freq, end_freq, dur_ms, decay, vol, delay_ms) in tones_for(event) {
+            let mut rng = self.rng.borrow_mut();
+            for (start_freq, end_freq, dur_ms, decay, vol, delay_ms) in tones_for(event, &mut rng) {
                 mixer.add(Tone::new(start_freq, end_freq, dur_ms, decay, vol, delay_ms));
             }
         }
@@ -217,6 +253,72 @@ mod real {
     impl Default for SoundEngine {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    // 実際の音声出力(rodioのシンク)が無いheadless環境でも実行できる、パラメータ
+    // 選択ロジックのテスト。音そのものの聞こえ方は検証できないため、
+    // 「複数バリエーションが用意されていて、実際にランダムに選ばれること」を確認する。
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn bubble_has_multiple_distinct_variants() {
+            // 聞き分けられる程度のバリエーション数が欲しい(1種類だけの単調さを解消する)。
+            assert!(
+                BUBBLE_VARIANTS.len() >= 3,
+                "気泡音のバリエーションは複数(3種以上)欲しい"
+            );
+            // 開始周波数が全パターンで重複しない(=見た目上、別々の音色として
+            // 定義されている)ことを確認する。
+            let mut start_freqs: Vec<u32> = BUBBLE_VARIANTS.iter().map(|v| v.0.to_bits()).collect();
+            start_freqs.sort_unstable();
+            start_freqs.dedup();
+            assert_eq!(
+                start_freqs.len(),
+                BUBBLE_VARIANTS.len(),
+                "各バリエーションの開始周波数は重複しないはず"
+            );
+        }
+
+        #[test]
+        fn choose_bubble_variant_actually_varies_across_many_draws() {
+            // 固定シードのRNGで十分な回数選ばせ、複数の異なるバリエーションが
+            // 実際に選ばれること(=常に同じ1パターンに固定されていないこと)を確認する。
+            let mut rng = Rng::new(42);
+            let mut seen: Vec<u32> = Vec::new();
+            for _ in 0..200 {
+                let spec = choose_bubble_variant(&mut rng);
+                let key = spec.0.to_bits();
+                if !seen.contains(&key) {
+                    seen.push(key);
+                }
+            }
+            assert!(
+                seen.len() > 1,
+                "200回選べば複数のバリエーションが選ばれるはず(実際に選ばれたのは{}種類)",
+                seen.len()
+            );
+            // BUBBLE_VARIANTSの範囲外を指していないことも確認する。
+            for key in &seen {
+                assert!(
+                    BUBBLE_VARIANTS.iter().any(|v| v.0.to_bits() == *key),
+                    "選ばれたバリエーションはBUBBLE_VARIANTSの範囲内であるはず"
+                );
+            }
+        }
+
+        #[test]
+        fn choose_bubble_variant_never_panics_regardless_of_seed() {
+            // range_usize の範囲指定ミス(境界外インデックス)が無いことを、複数シードで
+            // 回してみて確認する(パニックしなければOK)。
+            for seed in [1u64, 2, 100, 999_999, u64::MAX] {
+                let mut rng = Rng::new(seed);
+                for _ in 0..20 {
+                    let _ = choose_bubble_variant(&mut rng);
+                }
+            }
         }
     }
 }
