@@ -728,6 +728,16 @@ pub const DASH_SPEED_MULT: f64 = 1.5; // ダッシュ中、最高速度が一時
 // あくまで一瞬の体の動きなので、時間は短く保つ(反転の瞬間にだけ気づく程度)。
 pub const TURN_FACING_DURATION: f64 = 0.12; // ターン演出全体の時間(秒)
 
+// --- 摂餌・捕食の口元フラッシュ演出 ---
+// 通常種が餌を食べた瞬間、およびピラニア・タコが噛みついて捕食した瞬間に、
+// 専用の別ドット絵を用意する代わりに既存スプライトの一部ピクセルを一瞬明るく
+// 変調する(ヒレのパタパタ演出と同じ考え方)。fish.rs の
+// Fish::feed_flash_intensity/bite_flash_intensityが経過時間から強さを判定し、
+// main.rsのfish_pixel_colorが目・アクセント色のピクセルをブレンドする。
+// 方向転換の体ひねりフレックスと同じく一瞬の演出なので短く保つ。
+pub const FEED_FLASH_DURATION: f64 = 0.15; // 摂餌: 控えめに一瞬だけ
+pub const BITE_FLASH_DURATION: f64 = 0.25; // 捕食: 摂餌よりも少し長く強めに見せる
+
 // --- ガラスを叩く「叩きすぎ」ペナルティ(ストレス) ---
 // 短時間に何度も t を連打すると、ストレスとして周辺の魚に病気発症のボーナスを与える。
 // 稀にしか叩かない通常利用では閾値に届かず影響が出ない。
@@ -3469,6 +3479,10 @@ impl Simulation {
             f.y = f.y.clamp(top_edge_margin.min(y_bottom_bound), y_bottom_bound);
             // ターン演出(前向き/背面向き遷移スプライト)の残り時間を減らす。
             f.turn_facing_timer = (f.turn_facing_timer - dt).max(0.0);
+            // 摂餌・捕食の口元フラッシュの残り時間を減らす(fish.rs の
+            // feed_flash_intensity/bite_flash_intensityが消費する)。
+            f.feed_flash_timer = (f.feed_flash_timer - dt).max(0.0);
+            f.bite_flash_timer = (f.bite_flash_timer - dt).max(0.0);
             // 進行方向で左右反転(微小速度では維持)。反転した瞬間だけ、真横向きから
             // 反対の真横向きへの即時切り替えではなく、一瞬前向き/背面向きスプライトを
             // 経由するターン演出タイマーを立てる(fish.rs の Fish::display_sprite が
@@ -3545,6 +3559,9 @@ impl Simulation {
             }
             if let Some(fi) = best_fi {
                 f.hunger = (f.hunger + FEED_AMOUNT * f.feed_efficiency_mult).min(MAX_HUNGER);
+                // 食べた瞬間、目のピクセルを一瞬明るく光らせる摂餌フラッシュを立てる
+                // (fish.rs の Fish::feed_flash_intensity 参照)。
+                f.feed_flash_timer = FEED_FLASH_DURATION;
                 eaten[fi] = true;
             }
         }
@@ -4485,6 +4502,10 @@ impl Simulation {
             self.fish[si].hunger =
                 (self.fish[si].hunger + gain * self.fish[si].feed_efficiency_mult).min(MAX_HUNGER);
             self.fish[si].predation_cooldown = cooldown;
+            // 噛みついた瞬間、捕食者の口周り(体のアクセント色)を一瞬強く光らせる
+            // 捕食フラッシュを立てる(fish.rs の Fish::bite_flash_intensity 参照)。
+            // ピラニア・タコに限らず、無敵中の一時的捕食者による捕食も同じ演出にする。
+            self.fish[si].bite_flash_timer = BITE_FLASH_DURATION;
             // ピラニアは捕食するたびに段階的に大きくなる(上限 PIRANHA_MAX_KILL_STAGE で打ち止め。
             // タコはこの成長ボーナスの対象外)
             if predator_species == Species::Piranha && self.fish[si].kill_stage < PIRANHA_MAX_KILL_STAGE {
@@ -5609,6 +5630,48 @@ mod tests {
         }
         sim.update(0.1, 80, 40);
         assert_eq!(sim.food_count(), 9, "1tickで消費されるのは1粒だけのはず");
+    }
+
+    // 摂餌フラッシュ(fish.rsのfeed_flash_intensityが消費するタイマー)は、食べた
+    // 瞬間にFEED_FLASH_DURATIONへセットされ、その後は時間経過で単調に減っていき、
+    // 最終的に0で止まる(通常表示に戻る)はず。
+    #[test]
+    fn eating_food_sets_and_then_decays_the_feed_flash_timer() {
+        let mut sim = Simulation::new(Rng::new(78));
+        let mut f = Fish::new(Species::Guppy, Stage::Adult, 40.0, 20.0);
+        f.hunger = 10.0;
+        sim.fish.push(f);
+        sim.food.push(Food {
+            x: 40.0,
+            y: 20.0,
+            vy: 0.0,
+            life: 30.0,
+            landed: false,
+            sway_phase: 0.0,
+        });
+        assert_eq!(sim.fish[0].feed_flash_timer, 0.0, "食べる前はタイマー0のはず");
+
+        sim.update(0.1, 80, 40);
+        assert_eq!(sim.food_count(), 0, "餌が食べられて消えているはず");
+        assert_eq!(
+            sim.fish[0].feed_flash_timer, FEED_FLASH_DURATION,
+            "食べた瞬間にタイマーがFEED_FLASH_DURATIONへセットされるはず"
+        );
+
+        let mut prev = sim.fish[0].feed_flash_timer;
+        loop {
+            sim.update(0.05, 80, 40);
+            let now = sim.fish[0].feed_flash_timer;
+            assert!(
+                now <= prev,
+                "タイマーは時間経過で単調に減るはず: prev={prev} now={now}"
+            );
+            prev = now;
+            if now <= 0.0 {
+                break;
+            }
+        }
+        assert_eq!(sim.fish[0].feed_flash_timer, 0.0, "最終的に0で止まるはず(負にならない)");
     }
 
     #[test]
@@ -7326,6 +7389,50 @@ mod tests {
         assert_eq!(sim.blood_stains.len(), 1, "捕食で血の滲みが1つ出るはず");
         // このtick内で生成後すぐにdt(0.1)分減衰するため、ほぼ満タンのはず
         assert!(sim.blood_stains[0].life > BLOOD_STAIN_LIFETIME - 0.2);
+    }
+
+    // 捕食フラッシュ(fish.rsのbite_flash_intensityが消費するタイマー)は、噛みついた
+    // 瞬間にBITE_FLASH_DURATIONへセットされ、その後は時間経過で単調に減っていき、
+    // 最終的に0で止まる(通常表示に戻る)はず。ピラニア・タコどちらも同じ
+    // update_predation内の共通処理でセットされるため、ピラニアで代表して確認する。
+    #[test]
+    fn piranha_bite_sets_and_then_decays_the_bite_flash_timer() {
+        let mut sim = Simulation::new(Rng::new(100));
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, 40.0, 20.0);
+        piranha.hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+        sim.fish.push(piranha);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 45.0, 20.0));
+
+        assert_eq!(sim.fish[0].bite_flash_timer, 0.0, "噛みつく前はタイマー0のはず");
+
+        for _ in 0..30 {
+            sim.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+            sim.update(0.1, 80, 40);
+            if sim.fish[1].piranha_bite_count > 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            sim.fish[0].bite_flash_timer, BITE_FLASH_DURATION,
+            "噛みついた瞬間にタイマーがBITE_FLASH_DURATIONへセットされるはず"
+        );
+
+        // ピラニアはこの直後PIRANHA_HUNT_COOLDOWN(15秒)のクールダウンに入るため、
+        // 以下の短い減衰確認の間に再度噛みついてタイマーが立て直されることはない。
+        let mut prev = sim.fish[0].bite_flash_timer;
+        loop {
+            sim.update(0.05, 80, 40);
+            let now = sim.fish[0].bite_flash_timer;
+            assert!(
+                now <= prev,
+                "タイマーは時間経過で単調に減るはず: prev={prev} now={now}"
+            );
+            prev = now;
+            if now <= 0.0 {
+                break;
+            }
+        }
+        assert_eq!(sim.fish[0].bite_flash_timer, 0.0, "最終的に0で止まるはず(負にならない)");
     }
 
     #[test]

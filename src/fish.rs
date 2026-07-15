@@ -3,7 +3,8 @@
 
 use crate::color::Color;
 use crate::sim::{
-    AGILITY_FRY_SIZE_STEPS, AGILITY_MULT_MAX, AGILITY_MULT_MIN, AGILITY_STEP, FULL_THRESHOLD,
+    AGILITY_FRY_SIZE_STEPS, AGILITY_MULT_MAX, AGILITY_MULT_MIN, AGILITY_STEP, BITE_FLASH_DURATION,
+    FEED_FLASH_DURATION, FULL_THRESHOLD,
     GENERAL_GROWTH_SCALE_STEP, GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE, HUNGRY_THRESHOLD, MAX_HUNGER,
     OCTOPUS_BASE_SCALE_BONUS, OCTOPUS_BITE_SPEED_MULT, PIRANHA_BITE_SPEED_MULT,
     PIRANHA_KILL_GROWTH_SCALE_STEP,
@@ -120,6 +121,18 @@ pub struct Fish {
     // 通常表示(sim.rsのupdate_movementがfacing_right反転の瞬間にセットする)。
     #[serde(default)]
     pub turn_facing_timer: f64,
+    // 通常の餌を食べた瞬間、目のピクセルを一瞬明るく光らせる摂餌フラッシュの
+    // 残り時間。turn_facing_timerと同じ「専用ドット絵を使わず既存ピクセルを
+    // 変調するだけ」の考え方で、0の間は通常表示(sim.rsのupdate_foodが食べた
+    // 瞬間にセットする)。main.rsのfish_pixel_colorが消費する。
+    #[serde(default)]
+    pub feed_flash_timer: f64,
+    // ピラニア・タコ(および無敵中の一時的捕食者)が噛みついて捕食した瞬間、
+    // 体のアクセント色のピクセルを一瞬強く光らせる捕食フラッシュの残り時間。
+    // feed_flash_timerと同じ仕組みで、sim.rsのupdate_predationが捕食成立の
+    // 瞬間にセットする。
+    #[serde(default)]
+    pub bite_flash_timer: f64,
     // 満腹を維持している時間(成長・繁殖の判定に使う)
     pub well_fed_timer: f64,
     // 空腹度0が続いている時間(弱り・死亡判定に使う)
@@ -299,6 +312,8 @@ impl Fish {
             vy: 0.0,
             facing_right: true,
             turn_facing_timer: 0.0,
+            feed_flash_timer: 0.0,
+            bite_flash_timer: 0.0,
             well_fed_timer: 0.0,
             starve_timer: 0.0,
             sick: false,
@@ -385,6 +400,28 @@ impl Fish {
         }
         let progress = (1.0 - self.turn_facing_timer / TURN_FACING_DURATION).clamp(0.0, 1.0);
         (1.0 - (progress * 2.0 - 1.0).abs()).clamp(0.0, 1.0)
+    }
+
+    // 摂餌フラッシュの強さ(0.0=通常、1.0=食べた直後の最大)。turn_flex_intensityの
+    // ような往復の三角波ではなく、セットされた瞬間が最大でそこから0まで単調に
+    // 減っていくだけの単純な減衰(一度きりの明滅なので、通常表示へ往復させる
+    // 必要が無い)。main.rsのfish_pixel_colorが、この値を使って目のピクセルを
+    // ブレンドする。
+    pub fn feed_flash_intensity(&self) -> f64 {
+        if self.feed_flash_timer <= 0.0 {
+            return 0.0;
+        }
+        (self.feed_flash_timer / FEED_FLASH_DURATION).clamp(0.0, 1.0)
+    }
+
+    // 捕食(噛みつき)フラッシュの強さ。feed_flash_intensityと同じ単純減衰。
+    // main.rsのfish_pixel_colorが、この値を使って体のアクセント色のピクセルを
+    // ブレンドする。
+    pub fn bite_flash_intensity(&self) -> f64 {
+        if self.bite_flash_timer <= 0.0 {
+            return 0.0;
+        }
+        (self.bite_flash_timer / BITE_FLASH_DURATION).clamp(0.0, 1.0)
     }
 
     // 水底に沈み切って横たわった死骸専用のスプライト(has_lying_spriteがtrueの
@@ -1239,6 +1276,19 @@ pub fn fin_color(species: Species) -> Color {
     palette(species).fin
 }
 
+// 種ごとの目('E')色を返す。fin_color()と同じ理由(Sprite::pixelsは解決済みの色
+// しか持たないため、描画側で目のピクセルかどうかを判別したいときはパレット色との
+// 一致で判定する)で公開する。摂餌フラッシュ(main.rsのfish_pixel_color)が使う。
+pub fn eye_color(species: Species) -> Color {
+    palette(species).eye
+}
+
+// 種ごとのアクセント('A')色を返す。fin_color()/eye_color()と同じ理由で公開する。
+// 捕食(噛みつき)フラッシュ(main.rsのfish_pixel_color)が使う。
+pub fn accent_color(species: Species) -> Color {
+    palette(species).accent
+}
+
 // 水底に沈み切った死骸用の「横倒れ」専用スプライト(Sprite::for_lying_fish)を
 // 持つ種かどうか。今回のスコープは通常種5種のみで、ピラニア・タコ・クジラは
 // 対象外(描画側main.rsはこれがfalseの種には従来通りの上下反転(仰向け)を使う)。
@@ -1532,6 +1582,48 @@ mod tests {
 
         fish.turn_facing_timer = 0.0;
         assert_eq!(fish.turn_flex_intensity(), 0.0, "タイマーが切れたら強さ0のはず");
+    }
+
+    // feed_flash_intensity/bite_flash_intensityは、turn_flex_intensityのような
+    // 往復の三角波ではなく、セットされた瞬間(タイマー=DURATION)が最大(1.0)で、
+    // そこから時間経過(タイマーの減少)に応じて単調に0まで減っていく単純な
+    // 減衰であることを確認する。0の間は常に強さ0(通常表示と一致)、セット直後は
+    // 強さ最大(通常表示と異なる)という、要求される4性質の核心部分。
+    #[test]
+    fn feed_and_bite_flash_intensity_decay_monotonically_from_full_to_zero() {
+        let mut fish = Fish::new(Species::Piranha, Stage::Adult, 0.0, 0.0);
+
+        // イベント未発生(タイマー0): 強さ0(通常表示と一致)
+        assert_eq!(fish.feed_flash_timer, 0.0, "初期状態ではタイマーは0のはず");
+        assert_eq!(fish.bite_flash_timer, 0.0);
+        assert_eq!(fish.feed_flash_intensity(), 0.0, "タイマー0では強さ0のはず");
+        assert_eq!(fish.bite_flash_intensity(), 0.0);
+
+        // セットされた瞬間(タイマー=DURATION): 強さ最大(1.0、通常表示と異なる)
+        fish.feed_flash_timer = FEED_FLASH_DURATION;
+        fish.bite_flash_timer = BITE_FLASH_DURATION;
+        assert!(
+            (fish.feed_flash_intensity() - 1.0).abs() < 1e-9,
+            "セット直後(タイマー=DURATION)では強さ最大のはず"
+        );
+        assert!((fish.bite_flash_intensity() - 1.0).abs() < 1e-9);
+
+        // 時間経過(タイマーの減少)に応じて単調に減る
+        fish.feed_flash_timer = FEED_FLASH_DURATION * 0.5;
+        fish.bite_flash_timer = BITE_FLASH_DURATION * 0.5;
+        let mid_feed = fish.feed_flash_intensity();
+        let mid_bite = fish.bite_flash_intensity();
+        assert!(
+            mid_feed > 0.0 && mid_feed < 1.0,
+            "タイマー半分では強さも中間のはず: {mid_feed}"
+        );
+        assert!(mid_bite > 0.0 && mid_bite < 1.0, "タイマー半分では強さも中間のはず: {mid_bite}");
+
+        // タイマーが切れたら(0まで減ったら)強さ0に戻る(通常表示と一致)
+        fish.feed_flash_timer = 0.0;
+        fish.bite_flash_timer = 0.0;
+        assert_eq!(fish.feed_flash_intensity(), 0.0, "タイマーが切れたら強さ0のはず");
+        assert_eq!(fish.bite_flash_intensity(), 0.0);
     }
 
     // フレックス変形(with_turn_flex)は頭側のピクセルを体の中心へ寄せて

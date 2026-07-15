@@ -19,8 +19,9 @@ mod sound;
 
 use color::{
     apply_day_night, apply_murkiness, apply_purifier_tint, apply_whale_explosion_flash, day_brightness, lerp,
-    scale, vitality_color, water_gradient, Color, CURSOR, AFFINITY_FLAG, CRITICAL_FLAG, DEAD_FLAG, ELDERLY_FLAG,
-    GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND, SAND_DEEP, SICK_FLAG, SICK_TINT, WOUNDED_FLAG,
+    scale, vitality_color, water_gradient, Color, CURSOR, AFFINITY_FLAG, BITE_FLASH_GLOW_COLOR, CRITICAL_FLAG,
+    DEAD_FLAG, ELDERLY_FLAG, FEED_FLASH_GLOW_COLOR, GAUGE_EMPTY, HUNGRY_FLAG, INVINCIBLE_GLOW_COLOR, SAND,
+    SAND_DEEP, SICK_FLAG, SICK_TINT, WOUNDED_FLAG,
 };
 use chrono::{Local, Timelike};
 use crossterm::{
@@ -841,6 +842,24 @@ fn fish_pixel_color(f: &Fish, dx: usize, dy: usize, base: Color, elapsed: f64) -
         let phase = elapsed * sim::FIN_FLUTTER_FREQ + f.x * 0.31 + f.y * 0.53;
         let flutter = 1.0 + sim::FIN_FLUTTER_AMPLITUDE * phase.sin();
         c = scale(c, flutter);
+    }
+    // 摂餌フラッシュ: 通常の餌を食べた瞬間、目('E')色のピクセルを一瞬明るく光らせる。
+    // ヒレのパタパタと同じく専用ドット絵を使わず、既存ピクセルの色をブレンドするだけの
+    // 方式(fish.rsのFish::feed_flash_intensityが経過時間から強さを判定する)。
+    if !f.dead && base == fish::eye_color(f.species) {
+        let feed_flash = f.feed_flash_intensity();
+        if feed_flash > 0.0 {
+            c = lerp(c, FEED_FLASH_GLOW_COLOR, feed_flash * 0.5);
+        }
+    }
+    // 捕食フラッシュ: ピラニア・タコが噛みついた瞬間、体のアクセント('A')色の
+    // ピクセルを一瞬強く(赤みがかって)光らせる。摂餌フラッシュより強く、色も変えて
+    // 見分けられるようにする(fish.rsのFish::bite_flash_intensity参照)。
+    if !f.dead && base == fish::accent_color(f.species) {
+        let bite_flash = f.bite_flash_intensity();
+        if bite_flash > 0.0 {
+            c = lerp(c, BITE_FLASH_GLOW_COLOR, bite_flash * 0.75);
+        }
     }
     if f.is_invincible() {
         // スター(無敵アイテム)取得中: 光る/点滅するエフェクトで通常状態と見分けられる
@@ -2457,6 +2476,102 @@ mod tests {
             assert!(
                 max_channel_delta <= allowed,
                 "{sp:?}: ヒレの明滅は控えめであるはず(max_channel_delta={max_channel_delta}, allowed<={allowed})"
+            );
+        }
+    }
+
+    // 摂餌フラッシュ演出: feed_flash_timerが0の間はfish_pixel_colorが通常表示
+    // (base色そのまま)と一致し、セットされた直後(FEED_FLASH_DURATION)は目('E')色
+    // のピクセルだけ通常表示と異なる色になる(目以外のピクセルは変化しない)ことを
+    // 確認する。ヒレのパタパタ演出のテストと同じ考え方(同一個体・タイマーだけ変化)。
+    #[test]
+    fn feed_flash_brightens_eye_pixels_only_while_timer_is_running() {
+        for &sp in &Species::COMMON {
+            let mut f = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            let sprite = f.sprite();
+            let eye_color = fish::eye_color(sp);
+            let (edx, edy, ebase) = sprite
+                .pixels
+                .iter()
+                .copied()
+                .find(|&(_, _, c)| c == eye_color)
+                .unwrap_or_else(|| panic!("{sp:?}: 目色のピクセルが見つからないはず"));
+            let (bdx, bdy, bbase) = sprite
+                .pixels
+                .iter()
+                .copied()
+                .find(|&(_, _, c)| c != eye_color)
+                .unwrap_or_else(|| panic!("{sp:?}: 目以外の色のピクセルが見つからないはず"));
+
+            assert_eq!(f.feed_flash_timer, 0.0, "初期状態ではタイマーは0のはず");
+            let eye_normal = fish_pixel_color(&f, edx, edy, ebase, 0.0);
+            assert_eq!(
+                (eye_normal.r, eye_normal.g, eye_normal.b),
+                (ebase.r, ebase.g, ebase.b),
+                "{sp:?}: タイマー0の間は目のピクセルも通常表示(base色)と一致するはず"
+            );
+
+            f.feed_flash_timer = sim::FEED_FLASH_DURATION;
+            let eye_flashed = fish_pixel_color(&f, edx, edy, ebase, 0.0);
+            assert_ne!(
+                (eye_flashed.r, eye_flashed.g, eye_flashed.b),
+                (ebase.r, ebase.g, ebase.b),
+                "{sp:?}: セット直後は目のピクセルが通常表示と異なるはず"
+            );
+
+            let body_normal = fish_pixel_color(&f, bdx, bdy, bbase, 0.0);
+            assert_eq!(
+                (body_normal.r, body_normal.g, body_normal.b),
+                (bbase.r, bbase.g, bbase.b),
+                "{sp:?}: 摂餌フラッシュ中でも目以外のピクセルは通常表示のままのはず"
+            );
+        }
+    }
+
+    // 捕食フラッシュ演出: bite_flash_timerが0の間はfish_pixel_colorが通常表示と
+    // 一致し、セットされた直後(BITE_FLASH_DURATION)は体のアクセント('A')色の
+    // ピクセルだけ通常表示と異なる色になる(アクセント以外のピクセルは変化しない)
+    // ことを確認する。feed_flash側のテストと対になる確認。
+    #[test]
+    fn bite_flash_brightens_accent_pixels_only_while_timer_is_running() {
+        for &sp in &Species::COMMON {
+            let mut f = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            let sprite = f.sprite();
+            let accent_color = fish::accent_color(sp);
+            let (adx, ady, abase) = sprite
+                .pixels
+                .iter()
+                .copied()
+                .find(|&(_, _, c)| c == accent_color)
+                .unwrap_or_else(|| panic!("{sp:?}: アクセント色のピクセルが見つからないはず"));
+            let (bdx, bdy, bbase) = sprite
+                .pixels
+                .iter()
+                .copied()
+                .find(|&(_, _, c)| c != accent_color)
+                .unwrap_or_else(|| panic!("{sp:?}: アクセント以外の色のピクセルが見つからないはず"));
+
+            assert_eq!(f.bite_flash_timer, 0.0, "初期状態ではタイマーは0のはず");
+            let accent_normal = fish_pixel_color(&f, adx, ady, abase, 0.0);
+            assert_eq!(
+                (accent_normal.r, accent_normal.g, accent_normal.b),
+                (abase.r, abase.g, abase.b),
+                "{sp:?}: タイマー0の間はアクセントのピクセルも通常表示(base色)と一致するはず"
+            );
+
+            f.bite_flash_timer = sim::BITE_FLASH_DURATION;
+            let accent_flashed = fish_pixel_color(&f, adx, ady, abase, 0.0);
+            assert_ne!(
+                (accent_flashed.r, accent_flashed.g, accent_flashed.b),
+                (abase.r, abase.g, abase.b),
+                "{sp:?}: セット直後はアクセントのピクセルが通常表示と異なるはず"
+            );
+
+            let body_normal = fish_pixel_color(&f, bdx, bdy, bbase, 0.0);
+            assert_eq!(
+                (body_normal.r, body_normal.g, body_normal.b),
+                (bbase.r, bbase.g, bbase.b),
+                "{sp:?}: 捕食フラッシュ中でもアクセント以外のピクセルは通常表示のままのはず"
             );
         }
     }

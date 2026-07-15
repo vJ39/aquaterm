@@ -114,6 +114,12 @@ pub const ELDERLY_FLAG: Color = Color::new(220, 220, 150); // 寿命間近フラ
 // スター(無敵アイテム)取得中の発光エフェクト用の色(明るい金色)
 pub const INVINCIBLE_GLOW_COLOR: Color = Color::new(255, 235, 120);
 
+// 通常種が餌を食べた瞬間、目のピクセルを一瞬明るくする摂餌フラッシュ用の色(白)。
+pub const FEED_FLASH_GLOW_COLOR: Color = Color::new(255, 255, 255);
+// ピラニア・タコが噛みついた瞬間、体のアクセント色のピクセルを一瞬強く光らせる
+// 捕食フラッシュ用の色。摂餌フラッシュより赤みを帯びさせて区別する。
+pub const BITE_FLASH_GLOW_COLOR: Color = Color::new(255, 60, 40);
+
 // --- 昼夜の照明変化 ---
 // 実際の時刻に応じて水槽の照明を自動で変えてほしい(昼は現行のまま・夜は暗め落ち着いた
 // トーン・境界はなめらかに)という要望への対応。
