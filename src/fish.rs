@@ -901,28 +901,44 @@ impl Sprite {
             // 左端に上下へ大きく開く尾びれ(<)、中央上部に小さな背びれの隆起(F)、
             // 右側(頭)寄りに目(E)、腹側に淡い色の帯(A)を配した紡錘形の胴体。
             // Fry(稚魚)側は同じ形の考え方で小さく描く。
+            //
+            // クジラのドットが荒いとの指摘への対応(2026/07/16)。他の通常種と違い
+            // クジラはBIG_ADULT_GROWTH_STAGEのような専用の高解像度パターン切り替えを
+            // 持たず、この低解像度パターン自体をWHALE_BASE_SCALE_BONUSで大きく拡大
+            // 表示していたため、粗いドットが目立ちやすかった。行数・列数を約1.3倍に
+            // 増やして描き直した(Angelfishの高解像度パターンと同じ考え方で、
+            // 縦横2倍まで上げると図鑑(ヘルプ画面)のグリッド幅計算がスプライトの生の
+            // 幅を使っているため、そちらのレイアウトが崩れる。1.3倍程度に留めれば
+            // 崩れない)。同時にWHALE_BASE_SCALE_BONUS(sim.rs)も見た目の総倍率が
+            // 変わらないよう調整し、画面上の実サイズはほぼ変えていない
+            // (解像度だけを上げた)。
             (Species::Whale, Stage::Fry) => &[
-                "......FFF......",
-                "<....BBBBBBB...",
-                "<<.BBBBBBBBBB..",
-                ".<<BBBBBBBBBEB.",
-                "<<.BBBBBBBBBB..",
-                "<....BAAAABB...",
+                "..........FF......",
+                "<<...BBBBBBBBBB...",
+                "<<<.BBBBBBBBBBBBB.",
+                "..<BBBBBBBBBBBBBEB",
+                "..<BBBBBBBBBBBBBBB",
+                "..<BBBBAAAAAAAABBB",
+                "<<<.BBBAAAAAAAABB.",
+                "<<...BBBBBBBBBB...",
             ],
             (Species::Whale, Stage::Adult) => &[
-                "<.............FFF..........",
-                "<<...........FFFFF.........",
-                ".<<......BBBBBBBBBBBBBB....",
-                ".<<....BBBBBBBBBBBBBBBBB...",
-                "..<<.BBBBBBBBBBBBBBBBBBBB..",
-                "..<<BBBBBBBBBBBBBBBBBBBEBB.",
-                "..<<BBBBBBBBBBBBBBBBBBBBBB.",
-                "..<<BBBBBBBBBBBBBBBBBBBBBB.",
-                "..<<.BBBBAAAAAAAAAAAABBBB..",
-                ".<<....BBAAAAAAAAAABBBBB...",
-                ".<<......BBBBBBBBBBBBBB....",
-                "<<.........................",
-                "<..........................",
+                "...................FFFFF...........",
+                "..........BBBBBBBBBBBBBBBBB........",
+                "..........BBBBBBBBBBBBBBBBBBB......",
+                "<<........BBBBBBBBBBBBBBBBBBBBB....",
+                "<<<.....BBBBBBBBBBBBBBBBBBBBBBBB...",
+                ".<<<...BBBBBBBBBBBBBBBBBBBBBBBBBB..",
+                "...<<.BBBBBBBBBBBBBBBBBBBBBBBBBEBB.",
+                "....<BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                "....<BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                "....<BBBBBBBBBBBBBBBBBBBBBBBBABBBBB",
+                "...<<.BBBBBBBBBBBBBBBBBBBBBAAABBBB.",
+                ".<<<...BBBBAAAAAAAAAAAAAAAAAAABBB..",
+                "<<<.....BBBAAAAAAAAAAAAAAAAAAABB...",
+                "<<........BAAAAAAAAAAAAAAAAAABB....",
+                "..........BAAAAAAAAAAAAAAAABB......",
+                "..........BBBBBBBBBBBBBBBBB........",
             ],
         };
         Sprite::parse(lines, palette(species))
