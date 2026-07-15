@@ -161,6 +161,9 @@ pub struct Fish {
     // 老齢に達した瞬間の「最後の産卵」確定イベントを既に消化したかどうか
     #[serde(default)]
     pub elderly_spawned: bool,
+    // 一度でもつがいの交尾が成立したことがあるかどうか(老齢確定産卵の対象を絞るのに使う)
+    #[serde(default)]
+    pub has_mated: bool,
     // ランダムな瞬発ダッシュ(特定のトリガーが無い通常時の躍動感演出)の残り時間
     #[serde(default)]
     pub dash_timer: f64,
@@ -270,6 +273,7 @@ impl Fish {
             kill_stage: 0,
             age: 0.0,
             elderly_spawned: false,
+            has_mated: false,
             dash_timer: 0.0,
             dash_dx: 0.0,
             dash_dy: 0.0,

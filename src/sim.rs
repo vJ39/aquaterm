@@ -151,9 +151,12 @@ pub const POLLUTION_SICK_CHANCE_MAX_MULT: f64 = 4.0;
 // ならない、という抜け穴を防ぐため)。
 pub const POLLUTION_SICK_ELIGIBLE_FRAC: f64 = 0.5;
 // 稚魚(Fry)は病気を経由する通常の弱り→死亡経路(SICK_WEAK_TIME/SICK_DEATH_TIME)を
-// 待たず、水質が上記の閾値以上悪化している間、毎秒この確率で直接力尽きる
-// (稚魚は成魚より水質悪化に弱く、すぐ死んでしまうという仕様のため)。
-pub const POLLUTION_FRY_DEATH_CHANCE_PER_SEC: f64 = 0.1;
+// 待たず、水質が上記の閾値以上悪化している間、直接力尽きる(稚魚は成魚より水質悪化に
+// 弱く、すぐ死んでしまうという仕様のため)。平均生存時間はおよそ3分で、その平均から
+// 毎秒の死亡確率を逆算している。
+// 上記の条件下での稚魚の平均生存時間(秒)。この値から毎秒の死亡確率を逆算する。
+pub const POLLUTION_FRY_DEATH_MEAN_SECS: f64 = 180.0;
+pub const POLLUTION_FRY_DEATH_CHANCE_PER_SEC: f64 = 1.0 / POLLUTION_FRY_DEATH_MEAN_SECS;
 // 水質が悪化している間、捕食者(ピラニア・タコ)以外の通常種は食欲そのものを
 // 失う(空腹度の減りが速まり、update_movement側では餌を探して寄っていく
 // 誘引ベクトルも止める)。水質最悪でHUNGER_DECAYがこの倍になる。
@@ -1010,19 +1013,45 @@ impl Simulation {
 
     // 初期個体を撒く(セーブが無い初回起動 / リセット用)
     pub fn seed_initial(&mut self, pix_w: usize, pix_h: usize) {
-        let n = 5.min(capacity(pix_w, pix_h));
+        // 初期配置はピラニアを含めない通常種のみ(ピラニアの入手経路はSキーのみに限定する方針)。
+        // species_toggleでOFFにした種は選ばれない(spawn_pool経由)。
         let pool = self.spawn_pool();
-        for i in 0..n {
-            // 初期配置はピラニアを含めない通常種のみ(ピラニアの入手経路はSキーのみに限定する方針)。
-            // species_toggleでOFFにした種は選ばれない(spawn_pool経由)。
-            let sp = pool[i % pool.len()];
-            let stage = if i % 2 == 0 { Stage::Adult } else { Stage::Fry };
+        let cap = capacity(pix_w, pix_h);
+
+        // 水槽が極端に小さくつがい(2匹)すら入らない場合は、空にしないよう1匹だけ配置する。
+        if cap < 2 {
             let x = self.rng.range(6.0, (pix_w as f64 - 6.0).max(6.0));
             let y = self
                 .rng
                 .range(4.0, (pix_h as f64 - sand_height(pix_h) as f64 - 2.0).max(4.0));
-            let fish = self.roll_individuality(Fish::new(sp, stage, x, y));
+            let fish = self.roll_individuality(Fish::new(pool[0], Stage::Adult, x, y));
             self.fish.push(fish);
+            self.ensure_decorative_entities(pix_w, pix_h);
+            return;
+        }
+
+        // 種ごとに同種の成魚2匹を「つがい」として撒く。2匹は共通の基準点の近く
+        // (数ピクセルのゆらぎ内)に置くので、最初から求愛範囲に収まり、相手を探して
+        // 水槽中を泳ぎ回らなくても繁殖に入れる。成魚同士なので満腹タイマーが溜まれば
+        // すぐつがい候補になる(以前の成魚/稚魚交互配置はやめた)。
+        let max_pairs = (cap / 2).max(1);
+        let num_pairs = pool.len().min(max_pairs);
+        for i in 0..num_pairs {
+            let sp = pool[i % pool.len()];
+            let base_x = self.rng.range(6.0, (pix_w as f64 - 6.0).max(6.0));
+            let base_y = self
+                .rng
+                .range(4.0, (pix_h as f64 - sand_height(pix_h) as f64 - 2.0).max(4.0));
+            for _ in 0..2 {
+                // 基準点に数ピクセルのゆらぎを加える(求愛範囲COURTSHIP_RADIUSより十分小さい)。
+                let jitter = 3.0;
+                let x = (base_x + self.rng.range(-jitter, jitter))
+                    .clamp(6.0, (pix_w as f64 - 6.0).max(6.0));
+                let y = (base_y + self.rng.range(-jitter, jitter))
+                    .clamp(4.0, (pix_h as f64 - sand_height(pix_h) as f64 - 2.0).max(4.0));
+                let fish = self.roll_individuality(Fish::new(sp, Stage::Adult, x, y));
+                self.fish.push(fish);
+            }
         }
         self.ensure_decorative_entities(pix_w, pix_h);
     }
@@ -1893,6 +1922,8 @@ impl Simulation {
             }
             paired[i] = true;
             paired[j] = true;
+            self.fish[i].has_mated = true;
+            self.fish[j].has_mated = true;
             let mid_x = (fx + ox) / 2.0;
             let mid_y = (fy + oy) / 2.0;
             self.fish[i].well_fed_timer = 0.0;
@@ -3112,7 +3143,13 @@ impl Simulation {
             // 老齢に達した瞬間、満腹状態などの条件を問わず確定で1回だけ産卵する
             // (「老いると産卵確率が上がる」ではなく、次世代を残す最後のチャンスとしての
             // 一度きりの確定イベント。ピラニアは対象外=`S`キー以外で増えない方針のため)。
-            if !f.elderly_spawned && f.age >= ELDERLY_AGE * f.lifespan_mult && f.species.breeds() {
+            // ただし一度でもつがいの交尾を経験した個体(has_mated)に限る。一度もつがいに
+            // なれなかった個体はこの最後の産卵を行わない。
+            if !f.elderly_spawned
+                && f.age >= ELDERLY_AGE * f.lifespan_mult
+                && f.species.breeds()
+                && f.has_mated
+            {
                 f.elderly_spawned = true;
                 spawn_eggs.push((f.x, f.y, f.species, false));
                 messages.push(format!(
@@ -4861,13 +4898,20 @@ mod tests {
         fry.hunger = MAX_HUNGER; // 満腹を維持し、空腹側の死因ではないことを明確にする
         sim.fish.push(fry);
 
+        // 平均生存時間は約3分(POLLUTION_FRY_DEATH_MEAN_SECS=180秒)なので、その数倍の
+        // 猶予(1500秒)を回して確実に死亡させ、稀な取りこぼしでテストが不安定にならないようにする。
+        // 満腹を維持すると稚魚はGROW_TIME(30秒)で成魚に育ってこの経路の対象外になってしまう
+        // ため、毎tick稚魚のままに固定して(成長タイマーもリセット)、稚魚死亡経路そのものを
+        // 確実に検証する。
         let mut died = false;
-        for _ in 0..300 {
+        for _ in 0..1500 {
             if sim.fish.is_empty() {
                 died = true;
                 break;
             }
             sim.fish[0].hunger = MAX_HUNGER;
+            sim.fish[0].stage = Stage::Fry;
+            sim.fish[0].well_fed_timer = 0.0;
             sim.pollution = POLLUTION_MAX;
             sim.update(1.0, w, h);
             if sim.fish[0].dead {
@@ -4875,7 +4919,7 @@ mod tests {
                 break;
             }
         }
-        assert!(died, "水質最悪の稚魚は短時間(数分以内)で死亡演出に入るはず");
+        assert!(died, "水質最悪の稚魚は平均約3分で死亡演出に入るはず");
     }
 
     #[test]
@@ -6590,6 +6634,11 @@ mod tests {
             !sim.eggs.is_empty(),
             "交尾成立と同時に卵が産まれているはず"
         );
+        // 交尾が成立した両個体には交尾経験フラグ(has_mated)が立つはず。
+        assert!(
+            sim.fish[0].has_mated && sim.fish[1].has_mated,
+            "交尾したつがいの両方にhas_matedが立つはず"
+        );
         // 交尾したのは水面近く(y=30)だが、卵は常に水底付近に産まれる仕様のため、
         // ハート演出も交尾した実際の位置ではなく卵と同じ水底付近に出るはず
         // (そうしないと演出と卵の位置がズレて不自然に見える)。
@@ -6906,6 +6955,45 @@ mod tests {
     }
 
     #[test]
+    fn seed_initial_places_same_species_pairs_close_together() {
+        // 初期配置は種ごとに同種の成魚2匹を「つがい」として撒く。プールにいる各種について
+        // 成魚が2匹以上おり、かつ同種の2匹は互いに近く(求愛範囲COURTSHIP_RADIUSより十分
+        // 内側)に配置されるはず。
+        let (w, h) = (800, 200);
+        let mut sim = Simulation::new(Rng::new(4242));
+        sim.seed_initial(w, h);
+        assert!(!sim.fish.is_empty(), "テスト前提: 初期個体が存在すること");
+
+        let pool = sim.spawn_pool();
+        for &sp in &pool {
+            let members: Vec<(f64, f64)> = sim
+                .fish
+                .iter()
+                .filter(|f| f.species == sp && f.stage == Stage::Adult)
+                .map(|f| (f.x, f.y))
+                .collect();
+            assert!(
+                members.len() >= 2,
+                "{:?} は成魚が2匹以上いるはず(実際: {})",
+                sp,
+                members.len()
+            );
+            // 同種の全ペア間距離が求愛範囲より十分小さいこと(つがいが最初から近接している)。
+            for a in 0..members.len() {
+                for b in (a + 1)..members.len() {
+                    let d = ((members[a].0 - members[b].0).powi(2)
+                        + (members[a].1 - members[b].1).powi(2))
+                    .sqrt();
+                    assert!(
+                        d < COURTSHIP_RADIUS,
+                        "同種のつがいは求愛範囲より近くに配置されるはず(実際の距離: {d})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn seed_initial_never_includes_piranhas() {
         // ピラニアの入手経路はSキーのみに限定する方針: 初期配置にピラニアは含まれない。
         let (w, h) = (800, 200);
@@ -7098,11 +7186,13 @@ mod tests {
     #[test]
     fn elderly_fish_spawns_exactly_once_regardless_of_hunger() {
         // 老齢に達した瞬間、満腹状態などの条件を問わず確定で1回だけ産卵する
-        // (確率アップではなく一度きりの確定イベント)。
+        // (確率アップではなく一度きりの確定イベント)。ただし一度でもつがいの交尾を
+        // 経験した個体(has_mated)に限るので、ここではhas_matedを立てておく。
         let mut sim = Simulation::new(Rng::new(306));
         let mut f = Fish::new(Species::Neon, Stage::Fry, 20.0, 10.0); // 稚魚・満腹でもない
         f.hunger = 5.0; // 満腹条件を問わないことを確認するため、あえて腹ぺこにしておく
         f.age = ELDERLY_AGE - 0.05;
+        f.has_mated = true; // 交尾経験あり: 老齢確定産卵の対象
         sim.fish.push(f);
         assert!(sim.eggs.is_empty());
 
@@ -7130,6 +7220,33 @@ mod tests {
         // 短時間なので通常の確率的産卵はほぼ起こらない前提で、確定イベント分から
         // 大きく増えていないことを確認する(厳密な個数比較ではなく暴走チェック)
         assert!(sim.eggs.len() < eggs_after_first_event + 4);
+    }
+
+    #[test]
+    fn elderly_fish_that_never_mated_does_not_get_the_bonus_spawn() {
+        // 一度もつがいの交尾を経験していない個体(has_mated=false)は、老齢に達しても
+        // 最後の確定産卵を行わない(卵が現れず、確定産卵フラグも立たないまま)。
+        let mut sim = Simulation::new(Rng::new(3061));
+        let mut f = Fish::new(Species::Neon, Stage::Adult, 20.0, 10.0);
+        f.hunger = MAX_HUNGER;
+        f.age = ELDERLY_AGE - 0.05;
+        // has_mated は Fish::new のデフォルト(false)のまま = 交尾経験なし
+        sim.fish.push(f);
+        assert!(sim.eggs.is_empty());
+
+        for _ in 0..5 {
+            sim.update(0.1, 80, 40); // ELDERLY_AGE を跨ぐ
+        }
+
+        assert!(
+            !sim.fish[0].elderly_spawned,
+            "交尾経験のない個体は老齢確定産卵の対象外なのでフラグは立たないはず"
+        );
+        assert!(
+            sim.eggs.is_empty(),
+            "交尾経験のない個体は老齢でも卵を産まないはず: eggs={}",
+            sim.eggs.len()
+        );
     }
 
     #[test]
