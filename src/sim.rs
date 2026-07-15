@@ -3172,9 +3172,10 @@ impl Simulation {
             // 着水したものは水底に停留させず即座に取り除く。
             self.purifiers.retain(|p| p.y < sand_top);
             for lx in landings {
-                // 効果中に再投下しても濃度は満タン(1.0)に戻り、10分の希釈時計が
-                // 再スタートする。
-                self.purifier_concentration = 1.0;
+                // 連投すると1.0を超えて積み上がる(上限なし)。水質浄化・食欲不振・
+                // 老化加速のいずれも濃度に比例するだけの式なので、1.0超でも自然に
+                // 効果が強まる(薄まりきるまでの時間も連投した分だけ長引く)。
+                self.purifier_concentration += 1.0;
                 self.purify_blooms.push(PurifyBloom {
                     x: lx,
                     y: sand_top, // 水底(着水位置)を中心に広がる
@@ -5587,6 +5588,34 @@ mod tests {
             sim.purifier_concentration
         );
         assert!(!sim.purify_blooms.is_empty(), "着水で浄化ブルームが出るはず");
+    }
+
+    #[test]
+    fn repeated_purifier_drops_stack_concentration_above_one() {
+        // 効果が薄まりきる前に連投すると、濃度は1.0で頭打ちにならず加算されて
+        // 積み上がるはず(それに伴い浄化・食欲不振・老化の効果も強まる設計)。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(74));
+        sim.drop_purifier(40.0, w);
+        for _ in 0..500 {
+            sim.update(0.1, w, h);
+            if sim.purifiers.is_empty() {
+                break;
+            }
+        }
+        assert!(sim.purifier_concentration > 0.99);
+        sim.drop_purifier(40.0, w);
+        for _ in 0..500 {
+            sim.update(0.1, w, h);
+            if sim.purifiers.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            sim.purifier_concentration > 1.9,
+            "連投すると濃度は1.0を超えて積み上がるはず(実際: {})",
+            sim.purifier_concentration
+        );
     }
 
     #[test]
