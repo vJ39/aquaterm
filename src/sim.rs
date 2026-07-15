@@ -275,6 +275,13 @@ pub const OCTOPUS_RETURN_PULL: f64 = 240.0;
 pub const OCTOPUS_LEG_WIGGLE_FREQ: f64 = 2.2; // 波打つ速さ
 pub const OCTOPUS_LEG_WIGGLE_AMPLITUDE: f64 = 0.35; // 足の付け根1段あたりの振れ幅(論理ピクセル)
 
+// --- ヒレ('F')のパタパタアニメーション(見た目のみ。描画側=main.rsで使う) ---
+// ヒレを実際に動かすのではなく、時間経過に応じたサイン波で明暗を弱くゆらすことで
+// 「パタパタ動いている」ように見せる(いかにも泳いでいるかのような立体感の演出)。
+// 点滅に見えないよう振れ幅を小さく抑える(1.0倍を中心に±FIN_FLUTTER_AMPLITUDE)。
+pub const FIN_FLUTTER_FREQ: f64 = 3.0; // 羽ばたきの速さ(rad/秒相当)
+pub const FIN_FLUTTER_AMPLITUDE: f64 = 0.2; // 明暗の振れ幅(0.8〜1.2倍程度に収める)
+
 // --- タコ自身の捕食(ピラニアと同様に低頻度・空腹時のみ・クールダウンあり) ---
 // ピラニアと同じ理由(GAIN=60が大きいため、閾値を高くしないと満腹状態が長時間続く)で99にする
 pub const OCTOPUS_HUNT_HUNGER_THRESHOLD: f64 = 99.0;

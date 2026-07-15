@@ -566,7 +566,7 @@ fn handle_key(
 }
 
 // 魚のスプライト1ピクセルの色に、空腹度(腹ぺこは薄暗く)と病気(まだら・くすみ)を反映
-fn fish_pixel_color(f: &Fish, dx: usize, dy: usize, base: Color) -> Color {
+fn fish_pixel_color(f: &Fish, dx: usize, dy: usize, base: Color, elapsed: f64) -> Color {
     let mut c = base;
     if let HungerLevel::Hungry = f.hunger_level() {
         c = scale(c, 0.72); // 腹ぺこ = やや薄暗い
@@ -576,6 +576,17 @@ fn fish_pixel_color(f: &Fish, dx: usize, dy: usize, base: Color) -> Color {
         if (dx + dy) % 2 == 0 {
             c = scale(c, 0.68); // まだら(市松状に減光)
         }
+    }
+    // ヒレのパタパタ: ヒレ('F')色のピクセルにだけ、弱い明暗を掛けていかにも泳いで
+    // いるかのような立体感(ひだの動きによる陰影)を出す。ヒレ自体を動かすのではなく
+    // 明滅させる方式なので、Spriteにフラグを追加せずパレットのfin色との一致で
+    // 判定する(死亡時は静止させたいので対象外)。
+    if !f.dead && base == fish::fin_color(f.species) {
+        // 全個体が同じタイミングでパタつくと不自然なので、位置を位相のずれに使う
+        // (既存のシュリンプの上下ゆらぎ・卵のパルス演出と同じ手法)。
+        let phase = elapsed * sim::FIN_FLUTTER_FREQ + f.x * 0.31 + f.y * 0.53;
+        let flutter = 1.0 + sim::FIN_FLUTTER_AMPLITUDE * phase.sin();
+        c = scale(c, flutter);
     }
     if f.is_invincible() {
         // スター(無敵アイテム)取得中: 光る/点滅するエフェクトで通常状態と見分けられる
@@ -996,7 +1007,7 @@ fn draw_fish_sprite_cells(
             }
             _ => 0,
         };
-        let base_color = fish_pixel_color(f, src_dx, src_dy, base);
+        let base_color = fish_pixel_color(f, src_dx, src_dy, base, elapsed);
         for oy in y0..y1 {
             for ox in x0..x1 {
                 let px = left + ox + wiggle_dx;
@@ -1974,5 +1985,70 @@ mod tests {
         assert_eq!(dex_grid_columns(10), 1);
         let rows = dex_total_rows(10);
         assert!(rows > 0);
+    }
+
+    // ヒレのパタパタ演出: 同一個体(同一seed=位置固定・elapsedのみ変化)でも、
+    // ヒレ('F')色のピクセルは時間経過で色が変わるが、ヒレ以外(体色)のピクセルは
+    // 変化しないことを確認する。あわせて、変化の振れ幅が「点滅」にならない程度に
+    // 小さいこと(FIN_FLUTTER_AMPLITUDE分程度に収まること)も確認する。
+    #[test]
+    fn fin_pixels_flutter_over_time_while_body_pixels_stay_fixed() {
+        for &sp in &Species::COMMON {
+            // 位置を(0.0, 0.0)に固定して位相オフセットを0にし、t0=0では明滅なし
+            // (flutter=1.0)・t1=1/4周期後では最大側(flutter=1.0+AMPLITUDE)になる
+            // ようにする(fish_pixel_colorの位相計算 elapsed*FREQ + x*.. + y*.. を
+            // 決定的に検証するため)。
+            let f = Fish::new(sp, Stage::Adult, 0.0, 0.0); // 同一seed相当(状態固定)
+            let sprite = f.sprite();
+            let fin_color = fish::fin_color(sp);
+            let (fdx, fdy, fbase) = sprite
+                .pixels
+                .iter()
+                .copied()
+                .find(|&(_, _, c)| c == fin_color)
+                .unwrap_or_else(|| panic!("{sp:?}: ヒレ色のピクセルが見つからないはず"));
+            let (bdx, bdy, bbase) = sprite
+                .pixels
+                .iter()
+                .copied()
+                .find(|&(_, _, c)| c != fin_color)
+                .unwrap_or_else(|| panic!("{sp:?}: ヒレ以外の色のピクセルが見つからないはず"));
+
+            let t0 = 0.0;
+            let t1 = std::f64::consts::FRAC_PI_2 / sim::FIN_FLUTTER_FREQ; // 1/4周期後
+
+            let fin_c0 = fish_pixel_color(&f, fdx, fdy, fbase, t0);
+            let fin_c1 = fish_pixel_color(&f, fdx, fdy, fbase, t1);
+            assert_ne!(
+                (fin_c0.r, fin_c0.g, fin_c0.b),
+                (fin_c1.r, fin_c1.g, fin_c1.b),
+                "{sp:?}: ヒレのピクセルは時間経過で色が変化するはず"
+            );
+
+            let body_c0 = fish_pixel_color(&f, bdx, bdy, bbase, t0);
+            let body_c1 = fish_pixel_color(&f, bdx, bdy, bbase, t1);
+            assert_eq!(
+                (body_c0.r, body_c0.g, body_c0.b),
+                (body_c1.r, body_c1.g, body_c1.b),
+                "{sp:?}: ヒレ以外のピクセルは時間経過で色が変わらないはず"
+            );
+
+            // 「パタパタ」であって「点滅」に見えないよう、変化の振れ幅は小さいはず。
+            // t0→t1でscale factorは1.0→1.0+AMPLITUDEしか変わらないので、各チャンネルの
+            // 差は base*AMPLITUDE(+丸め誤差)を超えないはず。
+            let max_channel_delta = [
+                (fin_c0.r as i32 - fin_c1.r as i32).abs(),
+                (fin_c0.g as i32 - fin_c1.g as i32).abs(),
+                (fin_c0.b as i32 - fin_c1.b as i32).abs(),
+            ]
+            .into_iter()
+            .max()
+            .unwrap();
+            let allowed = (255.0 * sim::FIN_FLUTTER_AMPLITUDE).ceil() as i32 + 2;
+            assert!(
+                max_channel_delta <= allowed,
+                "{sp:?}: ヒレの明滅は控えめであるはず(max_channel_delta={max_channel_delta}, allowed<={allowed})"
+            );
+        }
     }
 }
