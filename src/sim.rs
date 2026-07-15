@@ -744,6 +744,12 @@ pub const AUTO_FEED_COOLDOWN: f64 = 30.0;
 pub const AUTO_FEED_FLOAT_THRESHOLD: usize = 3; // 漂っている(未着地の)餌がこれ未満なら投下対象
 pub const AUTO_MEDICATE_COOLDOWN: f64 = 30.0;
 pub const AUTO_MEDICATE_FLOAT_THRESHOLD: usize = 3;
+// 上限(AUTO_FEED_COUNT_CAP/AUTO_MEDICATE_COUNT_CAP)で頭打ちになり、投下してもなお
+// 空腹/病気の個体が残っている(足りていない)場合は、通常のクールダウンより短い間隔で
+// 連投してよい。ただし間隔を無くすと水質(pollution)が急激に悪化するため、0にはせず
+// 一定のインターバルを残す。
+pub const AUTO_FEED_SHORTFALL_COOLDOWN: f64 = 10.0;
+pub const AUTO_MEDICATE_SHORTFALL_COOLDOWN: f64 = 10.0;
 // 自動餌やり・自動投薬は、実際に空腹/病気な個体数から乖離した固定量(旧: 常に3〜5粒)
 // になっていたとの指摘への対応。餌1粒はFEED_AMOUNT(34)回復しHUNGRY_THRESHOLD(50)を
 // 十分越えられるので「空腹な個体数=必要な餌の数」、薬1粒は病気1匹をちょうど治すので
@@ -1898,7 +1904,13 @@ impl Simulation {
                 // 分離している)。散らばりは従来どおり±6px。
                 let count = hungry_count.min(AUTO_FEED_COUNT_CAP);
                 self.drop_food(x, pix_w, count, 6.0);
-                self.auto_feed_timer = AUTO_FEED_COOLDOWN;
+                // 上限で頭打ちになり、投下してもなお空腹な個体が残っている(足りていない)
+                // 場合は、通常より短いクールダウンで早めに連投する。
+                self.auto_feed_timer = if hungry_count > AUTO_FEED_COUNT_CAP {
+                    AUTO_FEED_SHORTFALL_COOLDOWN
+                } else {
+                    AUTO_FEED_COOLDOWN
+                };
             }
         }
 
@@ -1911,7 +1923,11 @@ impl Simulation {
                 // (水質悪化・処理落ちを防ぐため上限で頭打ち)。
                 let count = sick_count.min(AUTO_MEDICATE_COUNT_CAP);
                 self.drop_medicine(x, pix_w, count);
-                self.auto_medicate_timer = AUTO_MEDICATE_COOLDOWN;
+                self.auto_medicate_timer = if sick_count > AUTO_MEDICATE_COUNT_CAP {
+                    AUTO_MEDICATE_SHORTFALL_COOLDOWN
+                } else {
+                    AUTO_MEDICATE_COOLDOWN
+                };
             }
         }
 
@@ -6819,6 +6835,63 @@ mod tests {
             AUTO_MEDICATE_COUNT_CAP,
             "病気の個体が多くても薬はAUTO_MEDICATE_COUNT_CAPで頭打ちのはず(実際: {})",
             sim.medicine.len()
+        );
+    }
+
+    #[test]
+    fn auto_feed_and_medicate_use_a_shorter_cooldown_when_capped_amount_is_not_enough() {
+        // 上限で頭打ちになり、投下してもなお空腹/病気の個体が残っている(足りていない)
+        // 場合は、通常のクールダウン(30秒)より短いAUTO_FEED_SHORTFALL_COOLDOWN/
+        // AUTO_MEDICATE_SHORTFALL_COOLDOWNで連投してよいはず。
+        let mut sim = Simulation::new(Rng::new(405));
+        for i in 0..(AUTO_FEED_COUNT_CAP + 10) {
+            let mut f = Fish::new(Species::Neon, Stage::Adult, 4.0 + i as f64 * 0.5, 20.0);
+            f.hunger = 5.0;
+            f.sick = true;
+            sim.fish.push(f);
+        }
+
+        sim.update_auto_care(0.1, 200, 40);
+
+        assert_eq!(
+            sim.auto_feed_timer, AUTO_FEED_SHORTFALL_COOLDOWN,
+            "餌が足りていない(頭打ち)場合は短いクールダウンになるはず: {}",
+            sim.auto_feed_timer
+        );
+        assert_eq!(
+            sim.auto_medicate_timer, AUTO_MEDICATE_SHORTFALL_COOLDOWN,
+            "薬が足りていない(頭打ち)場合は短いクールダウンになるはず: {}",
+            sim.auto_medicate_timer
+        );
+
+        // 頭打ちで足りない間は、クールダウンが切れた時点で(浮いている餌/薬が
+        // まだ多く残っていない限り)すぐ次の投下判定に入れる短い間隔になっている
+        // ことを上のタイマー確認で検証済み。実際に追加投下されるかは浮いている
+        // 餌/薬の量(AUTO_FEED_FLOAT_THRESHOLD等)にも依存するため、ここでは
+        // 短いクールダウン自体の検証にとどめる。
+    }
+
+    #[test]
+    fn auto_feed_and_medicate_use_the_normal_cooldown_when_fully_satisfied() {
+        // 空腹/病気の個体数が上限未満(=完全に満たせる)場合は、通常のクールダウン
+        // (30秒)のままのはず(頭打ちではないため連投しない)。
+        let mut sim = Simulation::new(Rng::new(406));
+        let mut f = Fish::new(Species::Neon, Stage::Adult, 40.0, 20.0);
+        f.hunger = 5.0;
+        f.sick = true;
+        sim.fish.push(f);
+
+        sim.update_auto_care(0.1, 80, 40);
+
+        assert_eq!(
+            sim.auto_feed_timer, AUTO_FEED_COOLDOWN,
+            "足りている場合は通常のクールダウンのはず: {}",
+            sim.auto_feed_timer
+        );
+        assert_eq!(
+            sim.auto_medicate_timer, AUTO_MEDICATE_COOLDOWN,
+            "足りている場合は通常のクールダウンのはず: {}",
+            sim.auto_medicate_timer
         );
     }
 
