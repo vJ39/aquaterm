@@ -7,8 +7,7 @@ use crate::sim::{
     GENERAL_GROWTH_SCALE_STEP, GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE, HUNGRY_THRESHOLD, MAX_HUNGER,
     OCTOPUS_BASE_SCALE_BONUS, OCTOPUS_BITE_SPEED_MULT, PIRANHA_BITE_SPEED_MULT,
     PIRANHA_KILL_GROWTH_SCALE_STEP,
-    PIRANHA_MAX_KILL_STAGE, SIZE_SPEED_PENALTY_STEP, TURN_FACING_BACK_FRACTION,
-    TURN_FACING_DURATION, WHALE_BASE_SCALE_BONUS,
+    PIRANHA_MAX_KILL_STAGE, SIZE_SPEED_PENALTY_STEP, TURN_FACING_DURATION, WHALE_BASE_SCALE_BONUS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -360,50 +359,32 @@ impl Fish {
     }
 
     // 実際に画面へ描く描画専用スプライト。方向転換の直後(turn_facing_timer>0)は、
-    // 対応する種であれば通常の左右プロファイルの代わりに前向き/背面向きの
-    // 遷移スプライトを返す(無ければ通常スプライトにフォールバックする)。
+    // 通常の横向きプロファイル自身を軽くひねって(apply_turn_flex)返す。専用の
+    // 別ドット絵は使わないため、直前・直後の通常フレームと連続的につながって見える。
     // 呼び出しは描画箇所(main.rsのrender_tank)だけに限定し、壁際マージン等の
     // 判定にはsprite()(常に通常プロファイル)を使う。
     pub fn display_sprite(&self) -> Sprite {
-        if let Some(pose) = self.turn_pose() {
-            if let Some(turning) = Sprite::for_turning_fish(self.species, self.stage, pose) {
-                return turning;
-            }
+        let intensity = self.turn_flex_intensity();
+        if intensity > 0.0 {
+            Sprite::with_turn_flex(&self.sprite(), intensity)
+        } else {
+            self.sprite()
         }
-        self.sprite()
     }
 
-    // 方向転換の演出中かどうか、かつどちらのポーズを見せるべきか。
+    // 方向転換の演出中、いまどれだけ体をひねって見せるか(0.0=通常、1.0=最大)。
     // turn_facing_timerはセット直後がTURN_FACING_DURATION、0になるまで
-    // 減っていくカウントダウン式なので、経過時間はTURN_FACING_DURATIONからの
-    // 差分で求める。反転直後の短い前半分だけ背面向き(画面奥)を挟み、
-    // 残りの後半分は正面向き(画面手前)を見せてから通常表示に戻る。
-    //
-    // どちら向きへ旋回中か(旋回方向)は、facing_right自身から分かる。
-    // sim.rsのupdate_movementはfacing_right反転の瞬間にこのタイマーをセットし、
-    // 同じ瞬間にfacing_rightも新しい向きへ書き換えるため、タイマーが切れる
-    // (=この演出が終わる)までfacing_rightはその新しい向きのまま変わらない。
-    // つまり演出中は常に facing_right=true なら左→右への旋回中、false なら
-    // 右→左への旋回中を表す。
-    fn turn_pose(&self) -> Option<TurnPose> {
+    // 減っていくカウントダウン式。開始直後(進行度0)と終了直前(進行度1)で
+    // 必ず0になり、中間(進行度0.5)で最大になる三角波の包絡線にすることで、
+    // 通常プロファイルから連続的に変化して戻ってくることを保証する
+    // (前後のフレームと完全に同じ絵から始まり・終わるので、ポーズへの
+    // 唐突な切り替わりに見えない)。
+    fn turn_flex_intensity(&self) -> f64 {
         if self.turn_facing_timer <= 0.0 {
-            return None;
+            return 0.0;
         }
-        let elapsed = (TURN_FACING_DURATION - self.turn_facing_timer).max(0.0);
-        let turning_right = self.facing_right;
-        if elapsed < TURN_FACING_DURATION * TURN_FACING_BACK_FRACTION {
-            Some(if turning_right {
-                TurnPose::BackTurningRight
-            } else {
-                TurnPose::BackTurningLeft
-            })
-        } else {
-            Some(if turning_right {
-                TurnPose::FrontTurningRight
-            } else {
-                TurnPose::FrontTurningLeft
-            })
-        }
+        let progress = (1.0 - self.turn_facing_timer / TURN_FACING_DURATION).clamp(0.0, 1.0);
+        (1.0 - (progress * 2.0 - 1.0).abs()).clamp(0.0, 1.0)
     }
 
     // 水底に沈み切って横たわった死骸専用のスプライト(has_lying_spriteがtrueの
@@ -573,104 +554,6 @@ const BIG_ADULT_GROWTH_STAGE: u8 = 2;
 // グッピー・ベタの4種のみ。エンゼルフィッシュは縦縞の連続性が崩れて
 // 見える懸念があり、実際にレンダリングして確認した上で今回は対象外とした。
 const MAX_ADULT_GROWTH_STAGE: u8 = GENERAL_MAX_GROWTH_STAGE_WITH_VARIANCE;
-
-// 方向転換の演出中に見せる、真横向きとは別の一時的な向き。画面手前(視聴者側)を
-// 向く「正面向き」と、画面奥へ向き直る「背面向き」の2段階(Fish::turn_poseが
-// 経過時間から選ぶ)に加えて、どちら向きへ旋回している最中か(右→左/左→右)で
-// 4パターンに分かれる。単純な正面/背面の固定シルエットではなく、体を斜めに
-// ひねりながら向きを変える見た目にするための区別(2026/07/16、方向転換演出を
-// 旋回方向で分けたいという指摘への対応)。
-//
-// TurningLeft/TurningRightの実体のドット絵(Sprite::for_turning_fishが返す値)は
-// 同じものを指す。傾きの左右は、通常スプライトの左右反転描画(main.rsの
-// draw_fish_sprite_cellsが facing_right に応じてsrc_dxを反転する既存の仕組み)に
-// そのまま乗せて表現するため、ここで左右を別々のドット絵として持たせると、
-// 既存の反転描画と二重に反転してしまい傾きが逆転する。ドット絵自体を
-// 左右非対称(斜め)に描くことで、同じ1枚が反転描画によって「左に傾いた絵」
-// 「右に傾いた絵」の両方になる。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum TurnPose {
-    BackTurningLeft,   // 背面向き・右→左への旋回中
-    BackTurningRight,  // 背面向き・左→右への旋回中
-    FrontTurningLeft,  // 正面向き・右→左への旋回中
-    FrontTurningRight, // 正面向き・左→右への旋回中
-}
-
-// ネオン・金魚・グッピー・ピラニアで共用する、方向転換演出用の正面向きパターン。
-// 旧版(左右対称な楕円)は「単純な正面/背面に見えて旋回方向が分からない」という
-// 指摘を受け、体を斜めにひねった非対称の輪郭に描き直した(2026/07/16)。上段
-// (背びれ側)を左、下段(尾側)を右へ1列ずつずらし、右下がりの斜めの塊になって
-// いる。目2つ(E)・鼻先/口のアクセント(A)は変わらず中央の最も幅広い行に置く。
-// このパターン自体は常に同じ1枚で、旋回方向による左右の傾きの違いは呼び出し側
-// (main.rsのdraw_fish_sprite_cells、facing_rightに応じた既存の左右反転描画)が
-// そのまま作る(TurnPoseのコメント参照)。
-const TURN_FACING_STANDARD_FRONT: &[&str] = &[
-    "...FFF......",
-    "...FBBBF....",
-    "...FBBBBBF..",
-    "...FBBEAEBBF",
-    ".....FBBBBBF",
-    ".......FBBBF",
-    ".........FFF",
-];
-
-// 上記の背面向き版。振り向いた後ろ姿なので目(E)は見せず、中央に背筋の
-// アクセント(A)の縦筋だけを残す(輪郭の斜めの傾きはFRONTと同じ)。
-const TURN_FACING_STANDARD_BACK: &[&str] = &[
-    "...FFF......",
-    "...FBBBF....",
-    "...FBBABBF..",
-    "...FBBBABBBF",
-    ".....FBBABBF",
-    ".......FBBBF",
-    ".........FFF",
-];
-
-// エンゼルフィッシュの正面向き。長く伸びるヒレ・縞模様(A)が特徴のため、
-// 標準パターンよりAの面積を広げ、端まで届く長いヒレ(F)を持たせている
-// (輪郭の斜めの傾き方は標準パターンと同じ)。
-const TURN_FACING_ANGELFISH_FRONT: &[&str] = &[
-    "...FFF......",
-    "...FAAAF....",
-    "...FABBBAF..",
-    "...FABEAEBAF",
-    ".....FABBBAF",
-    ".......FAAAF",
-    ".........FFF",
-];
-
-const TURN_FACING_ANGELFISH_BACK: &[&str] = &[
-    "...FFF......",
-    "...FAAAF....",
-    "...FABBBAF..",
-    "...FABBABBAF",
-    ".....FABBBAF",
-    ".......FAAAF",
-    ".........FFF",
-];
-
-// ベタの正面向き。優雅に広がる大きなヒレ(F)が主役なので、標準パターンより
-// ひと回り大きく、体(B)を小さく・ヒレの面積を大きく取っている
-// (輪郭の斜めの傾き方は標準パターンと同じ)。
-const TURN_FACING_BETTA_FRONT: &[&str] = &[
-    "...FFFFF......",
-    "...FFBBBFF....",
-    "...FFBBBBBFF..",
-    "...FFBBEAEBBFF",
-    ".....FFBBBBBFF",
-    ".......FFBBBFF",
-    ".........FFFFF",
-];
-
-const TURN_FACING_BETTA_BACK: &[&str] = &[
-    "...FFFFF......",
-    "...FFBBBFF....",
-    "...FFBBBBBFF..",
-    "...FFBBBABBBFF",
-    ".....FFBBBBBFF",
-    ".......FFBBBFF",
-    ".........FFFFF",
-];
 
 // ドットマトリクスのスプライト。原点は左上、facing で左右反転する。
 pub struct Sprite {
@@ -1081,46 +964,52 @@ impl Sprite {
         Sprite::parse(lines, palette(species))
     }
 
-    // 方向転換の演出中に使う前向き(画面手前)/背面向き(画面奥)のスプライト。
-    // 真横向き(for_fish)とは別に、体高のある左右対称な楕円+目(前向きのみ)という
-    // シンプルな構図で描く。対象は通常種(COMMON)とピラニアの成魚のみ(稚魚・
-    // タコ・クジラは今回のスコープ外)で、該当しない組み合わせはNoneを返し
-    // 呼び出し側(Fish::sprite)が通常スプライトへフォールバックする。
-    fn for_turning_fish(species: Species, stage: Stage, pose: TurnPose) -> Option<Sprite> {
-        if stage != Stage::Adult {
-            return None;
+    // 方向転換の演出用に、いま表示中のプロファイル(base、通常はFish::sprite())
+    // を軽くひねった一時的なスプライトを作る。頭側(各種のドット絵で目('E')が
+    // 置かれている側=常にdxが大きい側。fish.rs内の全パターンで統一されている
+    // 描画上の約束)だけを、体の中心軸(縦横とも)へ向けてすぼめることで、
+    // 頭が一瞬こちら側(奥)へ向き直る遠近法的な「先細り」を表現する。尾側は
+    // 一切動かさないため、「尾は元の向きのまま、頭だけひねる」という見た目に
+    // なる。専用の別ドット絵を持たないため、intensity=0では基のスプライトと
+    // 完全に同じ絵になり(Fish::turn_flex_intensityが開始直後・終了直前に必ず0を
+    // 返す設計と合わせて)、通常フレームから連続的に変化して見える。
+    fn with_turn_flex(base: &Sprite, intensity: f64) -> Sprite {
+        let intensity = intensity.clamp(0.0, 1.0);
+        if intensity <= 0.0 || base.width < 4 {
+            return Sprite {
+                width: base.width,
+                height: base.height,
+                pixels: base.pixels.clone(),
+            };
         }
-        // TurningLeft/TurningRightは同じASCIIパターンを共有する(TurnPoseのコメント
-        // 参照。呼び出し側の左右反転描画が傾きの違いを作るため、ここで別々の
-        // ドット絵を用意すると二重に反転してしまう)。
-        let lines: &[&str] = match (species, pose) {
-            (Species::Neon, TurnPose::FrontTurningLeft | TurnPose::FrontTurningRight)
-            | (Species::Goldfish, TurnPose::FrontTurningLeft | TurnPose::FrontTurningRight)
-            | (Species::Guppy, TurnPose::FrontTurningLeft | TurnPose::FrontTurningRight)
-            | (Species::Piranha, TurnPose::FrontTurningLeft | TurnPose::FrontTurningRight) => {
-                TURN_FACING_STANDARD_FRONT
-            }
-            (Species::Neon, TurnPose::BackTurningLeft | TurnPose::BackTurningRight)
-            | (Species::Goldfish, TurnPose::BackTurningLeft | TurnPose::BackTurningRight)
-            | (Species::Guppy, TurnPose::BackTurningLeft | TurnPose::BackTurningRight)
-            | (Species::Piranha, TurnPose::BackTurningLeft | TurnPose::BackTurningRight) => {
-                TURN_FACING_STANDARD_BACK
-            }
-            (Species::Angelfish, TurnPose::FrontTurningLeft | TurnPose::FrontTurningRight) => {
-                TURN_FACING_ANGELFISH_FRONT
-            }
-            (Species::Angelfish, TurnPose::BackTurningLeft | TurnPose::BackTurningRight) => {
-                TURN_FACING_ANGELFISH_BACK
-            }
-            (Species::Betta, TurnPose::FrontTurningLeft | TurnPose::FrontTurningRight) => {
-                TURN_FACING_BETTA_FRONT
-            }
-            (Species::Betta, TurnPose::BackTurningLeft | TurnPose::BackTurningRight) => {
-                TURN_FACING_BETTA_BACK
-            }
-            (Species::Octopus, _) | (Species::Whale, _) => return None,
-        };
-        Some(Sprite::parse(lines, palette(species)))
+        let width = base.width as f64;
+        let center_y = (base.height as f64 - 1.0) / 2.0;
+        let head_boundary = width * 0.45;
+        let max_shift_x = width * 0.22 * intensity;
+        let pinch_y = 0.4 * intensity;
+        let pixels = base
+            .pixels
+            .iter()
+            .map(|&(dx, dy, color)| {
+                let dxf = dx as f64;
+                if dxf < head_boundary || width <= head_boundary {
+                    (dx, dy, color)
+                } else {
+                    let t = (dxf - head_boundary) / (width - head_boundary);
+                    let shift_x = (max_shift_x * t).round() as usize;
+                    let boundary_floor = head_boundary.ceil() as usize;
+                    let new_dx = dx.saturating_sub(shift_x).max(boundary_floor);
+                    let shift_y = ((dy as f64 - center_y) * pinch_y * t).round() as i64;
+                    let new_dy = (dy as i64 - shift_y).clamp(0, base.height as i64 - 1) as usize;
+                    (new_dx, new_dy, color)
+                }
+            })
+            .collect();
+        Sprite {
+            width: base.width,
+            height: base.height,
+            pixels,
+        }
     }
 
     // 水底に完全に沈み切った死骸用の「横倒れ」スプライト。通常種5種
@@ -1572,15 +1461,14 @@ mod tests {
         }
     }
 
-    // 方向転換の対象種(通常5種+ピラニアの成魚)は、facing_right反転の瞬間
-    // (turn_facing_timer=TURN_FACING_DURATION)にdisplay_sprite()が通常プロファイル
-    // とは異なる遷移スプライト(まず背面向き)に入り、時間が経つと正面向きへ移り、
-    // タイマーが切れると通常プロファイルへ戻ることを確認する。この間、sprite()
-    // (判定用)は常に通常プロファイルのまま変わらないことも合わせて確認する。
-    // 旋回方向(facing_right=true/false、つまり左→右/右→左への旋回)の両方で
-    // 同じことが成り立つかを確認する。
+    // 反転した瞬間(turn_facing_timer=TURN_FACING_DURATION、進行度0)と、
+    // タイマーが切れた瞬間(進行度1)は、どちらもひねりの強さが0で通常
+    // プロファイルと完全に一致し、中間(進行度0.5)でだけ通常プロファイルと
+    // 異なるひねりが乗るはず(専用の別ドット絵を使わず、通常フレームから
+    // 連続的に変化して戻ることの確認)。この間、sprite()(判定用)は常に
+    // 通常プロファイルのまま変わらないことも合わせて確認する。
     #[test]
-    fn turning_species_show_back_then_front_pose_then_revert_to_normal() {
+    fn display_sprite_flexes_only_around_the_midpoint_of_the_turn() {
         for &sp in &[
             Species::Neon,
             Species::Goldfish,
@@ -1588,145 +1476,69 @@ mod tests {
             Species::Piranha,
             Species::Angelfish,
             Species::Betta,
+            Species::Octopus,
+            Species::Whale,
         ] {
-            for &turning_right in &[true, false] {
-                let mut fish = Fish::new(sp, Stage::Adult, 0.0, 0.0);
-                fish.facing_right = turning_right;
-                let normal = Sprite::for_fish(sp, Stage::Adult, 0);
+            let mut fish = Fish::new(sp, Stage::Adult, 0.0, 0.0);
+            let normal = Sprite::for_fish(sp, Stage::Adult, 0);
 
-                // 反転した瞬間: 前半分(背面向き)に入っているはず。
-                fish.turn_facing_timer = TURN_FACING_DURATION;
-                let expected_back = if turning_right {
-                    TurnPose::BackTurningRight
-                } else {
-                    TurnPose::BackTurningLeft
-                };
-                assert_eq!(
-                    fish.turn_pose(),
-                    Some(expected_back),
-                    "{sp:?} turning_right={turning_right}: 反転直後は旋回方向に応じた背面向きのはず"
-                );
-                let back = fish.display_sprite();
-                assert_ne!(
-                    (back.width, back.height, &back.pixels),
-                    (normal.width, normal.height, &normal.pixels),
-                    "{sp:?} turning_right={turning_right}: 背面向き中は通常プロファイルと異なるはず"
-                );
-                let logical_during_back = fish.sprite();
-                assert_eq!(
-                    (logical_during_back.width, logical_during_back.height, &logical_during_back.pixels),
-                    (normal.width, normal.height, &normal.pixels),
-                    "{sp:?} turning_right={turning_right}: 背面向き中もsprite()(判定用)は通常プロファイルのままのはず"
-                );
+            fish.turn_facing_timer = TURN_FACING_DURATION;
+            let just_flipped = fish.display_sprite();
+            assert_eq!(
+                (just_flipped.width, just_flipped.height, &just_flipped.pixels),
+                (normal.width, normal.height, &normal.pixels),
+                "{sp:?}: 反転した瞬間(進行度0)はまだひねりが乗っていないはず"
+            );
 
-                // 背面向きの時間が過ぎたあと: 正面向きに入っているはず。
-                let front_timer = TURN_FACING_DURATION * (1.0 - TURN_FACING_BACK_FRACTION) - 0.001;
-                fish.turn_facing_timer = front_timer.max(0.0001);
-                let expected_front = if turning_right {
-                    TurnPose::FrontTurningRight
-                } else {
-                    TurnPose::FrontTurningLeft
-                };
-                assert_eq!(
-                    fish.turn_pose(),
-                    Some(expected_front),
-                    "{sp:?} turning_right={turning_right}: 背面向きの時間経過後は旋回方向に応じた正面向きのはず"
-                );
-                let front = fish.display_sprite();
-                assert_ne!(
-                    (front.width, front.height, &front.pixels),
-                    (normal.width, normal.height, &normal.pixels),
-                    "{sp:?} turning_right={turning_right}: 正面向き中は通常プロファイルと異なるはず"
-                );
-                assert_ne!(
-                    (front.width, front.height, &front.pixels),
-                    (back.width, back.height, &back.pixels),
-                    "{sp:?} turning_right={turning_right}: 正面向きと背面向きは異なるスプライトのはず"
-                );
+            fish.turn_facing_timer = TURN_FACING_DURATION * 0.5;
+            let mid = fish.display_sprite();
+            assert_ne!(
+                (mid.width, mid.height, &mid.pixels),
+                (normal.width, normal.height, &normal.pixels),
+                "{sp:?}: 方向転換の中間(進行度0.5)では通常プロファイルと異なるひねりが見えるはず"
+            );
+            let logical_mid = fish.sprite();
+            assert_eq!(
+                (logical_mid.width, logical_mid.height, &logical_mid.pixels),
+                (normal.width, normal.height, &normal.pixels),
+                "{sp:?}: 方向転換中もsprite()(判定用)は通常プロファイルのままのはず"
+            );
 
-                // タイマーが切れたら通常プロファイルに戻るはず。
-                fish.turn_facing_timer = 0.0;
-                assert_eq!(
-                    fish.turn_pose(),
-                    None,
-                    "{sp:?} turning_right={turning_right}: タイマーが0なら通常表示のはず"
-                );
-                let reverted = fish.display_sprite();
-                assert_eq!(
-                    (reverted.width, reverted.height, &reverted.pixels),
-                    (normal.width, normal.height, &normal.pixels),
-                    "{sp:?} turning_right={turning_right}: タイマーが切れたら通常プロファイルへ戻るはず"
-                );
-            }
+            fish.turn_facing_timer = 0.0;
+            let reverted = fish.display_sprite();
+            assert_eq!(
+                (reverted.width, reverted.height, &reverted.pixels),
+                (normal.width, normal.height, &normal.pixels),
+                "{sp:?}: タイマーが切れたら通常プロファイルへ戻るはず"
+            );
         }
     }
 
-    // 旋回方向(facing_right)が異なれば、同じタイミング(背面向き/正面向きの
-    // どちらの段階か)でも選ばれるTurnPoseが変わることの直接確認。
-    // display_sprite()自体は同じドット絵を指すが(TurnPoseのコメント参照)、
-    // 選択されるポーズの種類(TurningLeft/TurningRight)が旋回方向で
-    // 切り替わっていること自体をここで担保する。
+    // turn_flex_intensity自体が、進行度0→1にかけて0→最大(1.0)→0と
+    // 三角波を描くことの直接確認(display_sprite側のテストが依存する
+    // 前提そのもの)。
     #[test]
-    fn turn_pose_selection_differs_by_turn_direction() {
-        for &sp in &[
-            Species::Neon,
-            Species::Goldfish,
-            Species::Guppy,
-            Species::Piranha,
-            Species::Angelfish,
-            Species::Betta,
-        ] {
-            let mut right = Fish::new(sp, Stage::Adult, 0.0, 0.0);
-            right.facing_right = true;
-            let mut left = Fish::new(sp, Stage::Adult, 0.0, 0.0);
-            left.facing_right = false;
+    fn turn_flex_intensity_is_a_triangular_envelope_peaking_at_the_midpoint() {
+        let mut fish = Fish::new(Species::Neon, Stage::Adult, 0.0, 0.0);
 
-            for &timer in &[
-                TURN_FACING_DURATION,
-                TURN_FACING_DURATION * (1.0 - TURN_FACING_BACK_FRACTION) - 0.001,
-            ] {
-                right.turn_facing_timer = timer.max(0.0001);
-                left.turn_facing_timer = timer.max(0.0001);
-                assert_ne!(
-                    right.turn_pose(),
-                    left.turn_pose(),
-                    "{sp:?}: timer={timer}で旋回方向が違うのに同じTurnPoseが選ばれている"
-                );
-            }
-        }
+        fish.turn_facing_timer = TURN_FACING_DURATION;
+        assert_eq!(fish.turn_flex_intensity(), 0.0, "進行度0では強さ0のはず");
+
+        fish.turn_facing_timer = TURN_FACING_DURATION * 0.5;
+        assert!(
+            (fish.turn_flex_intensity() - 1.0).abs() < 1e-9,
+            "進行度0.5では強さ最大(1.0)のはず"
+        );
+
+        fish.turn_facing_timer = 0.0;
+        assert_eq!(fish.turn_flex_intensity(), 0.0, "タイマーが切れたら強さ0のはず");
     }
 
-    // 方向転換の遷移スプライト(全種×前向き/背面向き)は、非透明ピクセルが
-    // 上下左右で1つの塊に連結していること(バラバラの点の集まりに見えないこと)
-    // を確認する。
+    // フレックス変形(with_turn_flex)は頭側のピクセルを体の中心へ寄せて
+    // 圧縮するだけで、ピクセル自体を増減させたり幅・高さを変えたりしない
+    // はず(尾側のピクセルはそもそも変形対象にしないため無変化)。
     #[test]
-    fn turn_facing_patterns_are_single_connected_blobs() {
-        fn is_single_connected_blob(sprite: &Sprite) -> bool {
-            use std::collections::HashSet;
-            let cells: HashSet<(usize, usize)> =
-                sprite.pixels.iter().map(|&(dx, dy, _)| (dx, dy)).collect();
-            if cells.is_empty() {
-                return true;
-            }
-            let start = *cells.iter().next().unwrap();
-            let mut visited = HashSet::new();
-            let mut stack = vec![start];
-            visited.insert(start);
-            while let Some((x, y)) = stack.pop() {
-                for (nx, ny) in [
-                    (x.wrapping_sub(1), y),
-                    (x + 1, y),
-                    (x, y.wrapping_sub(1)),
-                    (x, y + 1),
-                ] {
-                    if cells.contains(&(nx, ny)) && visited.insert((nx, ny)) {
-                        stack.push((nx, ny));
-                    }
-                }
-            }
-            visited.len() == cells.len()
-        }
-
+    fn turn_flex_preserves_pixel_count_and_canvas_size() {
         for &sp in &[
             Species::Neon,
             Species::Goldfish,
@@ -1734,52 +1546,18 @@ mod tests {
             Species::Piranha,
             Species::Angelfish,
             Species::Betta,
+            Species::Octopus,
+            Species::Whale,
         ] {
-            for &pose in &[
-                TurnPose::BackTurningLeft,
-                TurnPose::BackTurningRight,
-                TurnPose::FrontTurningLeft,
-                TurnPose::FrontTurningRight,
-            ] {
-                let sprite = Sprite::for_turning_fish(sp, Stage::Adult, pose)
-                    .unwrap_or_else(|| panic!("{sp:?}/{pose:?}: 方向転換演出パターンが無い"));
-                assert!(
-                    is_single_connected_blob(&sprite),
-                    "{sp:?}/{pose:?}: 方向転換の遷移スプライトが上下左右で連結していない"
-                );
-            }
-        }
-    }
-
-    // 斜めの傾きが旋回方向によって見た目に出るには、パターン自体が左右対称で
-    // あってはならない(対称だと、facing_rightに応じた反転描画をかけても
-    // 見た目が変わらず「斜め」に見えない)。main.rsのdraw_fish_sprite_cellsと
-    // 同じ「width-1-dx」の反転を実際に適用し、反転前と異なることを確認する。
-    #[test]
-    fn turn_facing_patterns_are_not_left_right_symmetric() {
-        for &sp in &[
-            Species::Neon,
-            Species::Goldfish,
-            Species::Guppy,
-            Species::Piranha,
-            Species::Angelfish,
-            Species::Betta,
-        ] {
-            for &pose in &[TurnPose::FrontTurningRight, TurnPose::BackTurningRight] {
-                let sprite = Sprite::for_turning_fish(sp, Stage::Adult, pose).unwrap();
-                use std::collections::HashSet;
-                let original: HashSet<(usize, usize)> =
-                    sprite.pixels.iter().map(|&(dx, dy, _)| (dx, dy)).collect();
-                let mirrored: HashSet<(usize, usize)> = sprite
-                    .pixels
-                    .iter()
-                    .map(|&(dx, dy, _)| (sprite.width - 1 - dx, dy))
-                    .collect();
-                assert_ne!(
-                    original, mirrored,
-                    "{sp:?}/{pose:?}: 左右対称だと旋回方向による傾きの違いが見た目に出ない"
-                );
-            }
+            let base = Sprite::for_fish(sp, Stage::Adult, 0);
+            let flexed = Sprite::with_turn_flex(&base, 1.0);
+            assert_eq!(
+                flexed.pixels.len(),
+                base.pixels.len(),
+                "{sp:?}: フレックス変形でピクセル数が変わってはいけない"
+            );
+            assert_eq!(flexed.width, base.width, "{sp:?}: 幅は変わらないはず");
+            assert_eq!(flexed.height, base.height, "{sp:?}: 高さは変わらないはず");
         }
     }
 
@@ -1974,4 +1752,5 @@ mod tests {
             }
         }
     }
+
 }
