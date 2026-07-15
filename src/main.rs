@@ -34,7 +34,7 @@ use crossterm::{
 use fish::{crab_sprite, Fish, HungerLevel, Species, Stage};
 use framebuffer::FrameBuffer;
 use rng::Rng;
-use sim::{capacity, clamp_point, sand_height, Simulation, Star};
+use sim::{clamp_point, sand_height, Simulation, Star};
 use std::io::{Stdout, Write};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
@@ -103,9 +103,16 @@ pub(crate) struct Ctl {
     pub(crate) health_sfx_on: bool,    // 病気発症・回復・空腹発症の通知音
 }
 
-// 設定画面で切り替えられる項目数(効果音・オーバーレイ・自動モード・昼夜連動・自動魚補充・
-// 気泡音・捕食音・投下音・状態通知音・通常5種それぞれの生成トグル・餌の量・カニ)
-const SETTINGS_ITEM_COUNT: usize = 16;
+// 気泡音・捕食音・投下音・状態通知音・通常5種それぞれの生成トグル・餌の量・カニ・
+// 個体数上限)
+const SETTINGS_ITEM_COUNT: usize = 17;
+// 設定画面の項目インデックス: 個体数上限(←→キーで増減する。Enter/Spaceでは切替できない
+// 唯一の項目なので専用の定数にして分かりやすくする)。draw_settings_panelのitems構築順で
+// 最後に積んでいるため、SETTINGS_ITEM_COUNT-1と一致する。
+const SETTINGS_IDX_MAX_FISH_CAP: usize = SETTINGS_ITEM_COUNT - 1;
+// 個体数上限を←→キーで増減する時の1回あたりの変化量(Shift併用で高速化する)。
+const MAX_FISH_CAP_STEP: usize = 1;
+const MAX_FISH_CAP_STEP_FAST: usize = 5;
 
 fn main() {
     if let Err(e) = run() {
@@ -297,7 +304,7 @@ fn run() -> std::io::Result<()> {
             // 設定画面(サイドメニュー): 水槽の描画を止めず、右側に固定幅パネルを
             // 重ねて描く(全画面Clearしない・オーバーレイ表示)。
             if ctl.settings_on {
-                draw_settings_panel(&mut out, &ctl, &sim, cols_u, cell_rows)?;
+                draw_settings_panel(&mut out, &ctl, &sim, fb.pix_width(), fb.pix_height(), cols_u, cell_rows)?;
             }
             out.flush()?;
         }
@@ -377,6 +384,8 @@ fn handle_key(
     }
 
     // 設定画面: 上下で項目選択、Enter/スペースでトグル、Escで閉じる。
+    // 個体数上限の項目だけは切替(ON/OFF)ではなく数値なので、選択中は左右キーで
+    // 増減する(Shift併用で高速化)。
     // 他のキーは何もしない(誤操作で水槽側の操作に伝わらないようにする)。
     if ctl.settings_on {
         match code {
@@ -389,6 +398,22 @@ fn handle_key(
             }
             KeyCode::Down => {
                 ctl.settings_selected = (ctl.settings_selected + 1) % SETTINGS_ITEM_COUNT;
+            }
+            KeyCode::Left if ctl.settings_selected == SETTINGS_IDX_MAX_FISH_CAP => {
+                let step = if mods.contains(KeyModifiers::SHIFT) {
+                    MAX_FISH_CAP_STEP_FAST
+                } else {
+                    MAX_FISH_CAP_STEP
+                };
+                sim.decrease_max_fish_cap(fb.pix_width(), fb.pix_height(), step);
+            }
+            KeyCode::Right if ctl.settings_selected == SETTINGS_IDX_MAX_FISH_CAP => {
+                let step = if mods.contains(KeyModifiers::SHIFT) {
+                    MAX_FISH_CAP_STEP_FAST
+                } else {
+                    MAX_FISH_CAP_STEP
+                };
+                sim.increase_max_fish_cap(fb.pix_width(), fb.pix_height(), step);
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 let now_on = match ctl.settings_selected {
@@ -1512,7 +1537,7 @@ fn draw_status_bar(
         // 確認プロンプトを最優先で表示
         " 水槽をリセットしますか?  [y] 実行  /  他のキー 取消 ".to_string()
     } else {
-        let cap = capacity(pix_w, pix_h);
+        let cap = sim.effective_cap(pix_w, pix_h);
         let t = sim.elapsed as u64;
         let (mm, ss) = (t / 60, t % 60);
         let speed = if ctl.paused {
@@ -1811,11 +1836,15 @@ fn draw_species_dex(
 // 設定パネル(,キー): サイドメニューとして画面右側に固定幅で重ねて描く
 // (全画面Clearしない・水槽の描画は止めずに裏で動き続ける)。上下キーで選択・
 // Enter/スペースで切替・Escで閉じる。効果音等の既存トグルに加え、通常5種
-// それぞれの「生成トグル」(species_toggle)も一覧する。
+// それぞれの「生成トグル」(species_toggle)も一覧する。個体数上限だけは
+// 数値設定のため、選択中は左右キーで増減する(切替ではない)。
+#[allow(clippy::too_many_arguments)]
 fn draw_settings_panel(
     out: &mut Stdout,
     ctl: &Ctl,
     sim: &Simulation,
+    pix_w: usize,
+    pix_h: usize,
     cols: usize,
     rows: usize,
 ) -> std::io::Result<()> {
@@ -1850,6 +1879,7 @@ fn draw_settings_panel(
         sim::FEED_AMOUNT_LABELS[sim.feed_amount].to_string(),
     ));
     items.push(("カニ".to_string(), on_off(sim.crab_toggle)));
+    items.push(("個体数上限".to_string(), sim.max_fish_cap_label(pix_w, pix_h)));
 
     let mut lines: Vec<(String, &str)> = Vec::new();
     lines.push((" 設定".to_string(), fg));
@@ -1862,6 +1892,7 @@ fn draw_settings_panel(
     lines.push((String::new(), fg));
     lines.push((" ↑↓ 選択".to_string(), dim_fg));
     lines.push((" Enter/Space 切替".to_string(), dim_fg));
+    lines.push((" ←→ 個体数上限を増減(Shiftで5)".to_string(), dim_fg));
     lines.push((" Esc 閉じる".to_string(), dim_fg));
 
     for row in 0..rows {

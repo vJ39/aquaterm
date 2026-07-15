@@ -79,6 +79,11 @@ pub struct SavedState {
     // 旧セーブにはキーが無いため、従来どおりの量(レベル1)にfallbackする。
     #[serde(default = "default_feed_amount")]
     pub feed_amount: usize,
+    // 個体数上限のユーザー設定値(水槽内の個体数上限を設定で引き下げたいという要望への
+    // 対応)。旧セーブにはキーが無いため、従来どおり動的MAX(画面サイズ由来のcapacity)を
+    // そのまま使う「無制限」にfallbackする。
+    #[serde(default = "default_max_fish_cap")]
+    pub max_fish_cap: usize,
     // 水質(0=綺麗〜POLLUTION_MAX=最悪)。旧セーブにはキーが無いため、綺麗な状態(0.0)
     // にfallbackする(#[serde(default)]でf64の標準デフォルト0.0がそのまま使える)。
     #[serde(default)]
@@ -105,6 +110,10 @@ fn default_species_toggle() -> [bool; 5] {
 
 fn default_feed_amount() -> usize {
     crate::sim::FEED_AMOUNT_DEFAULT
+}
+
+fn default_max_fish_cap() -> usize {
+    crate::sim::MAX_FISH_CAP_UNLIMITED
 }
 
 fn default_speed_idx() -> usize {
@@ -162,6 +171,7 @@ pub fn save(sim: &Simulation, ctl: &crate::Ctl) -> std::io::Result<()> {
         health_sfx_on: ctl.health_sfx_on,
         species_toggle: sim.species_toggle,
         feed_amount: sim.feed_amount,
+        max_fish_cap: sim.max_fish_cap,
         pollution: sim.pollution,
         purifier_concentration: sim.purifier_concentration,
         crab_toggle: sim.crab_toggle,
@@ -190,6 +200,7 @@ pub fn restore_into(sim: &mut Simulation, ctl: &mut crate::Ctl, state: SavedStat
     sim.elapsed = state.elapsed;
     sim.species_toggle = state.species_toggle;
     sim.feed_amount = state.feed_amount;
+    sim.max_fish_cap = state.max_fish_cap;
     sim.pollution = state.pollution;
     sim.purifier_concentration = state.purifier_concentration;
     sim.crab_toggle = state.crab_toggle;
@@ -248,6 +259,7 @@ mod tests {
             health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
+            max_fish_cap: crate::sim::MAX_FISH_CAP_UNLIMITED,
             pollution: 0.0,
             purifier_concentration: 0.0,
             crab_toggle: true,
@@ -305,6 +317,11 @@ mod tests {
             "旧セーブではfeed_amountは従来どおりの量(デフォルト)にfallbackするはず"
         );
         assert_eq!(
+            restored.max_fish_cap,
+            crate::sim::MAX_FISH_CAP_UNLIMITED,
+            "旧セーブではmax_fish_capは無制限(動的MAXそのまま)にfallbackするはず"
+        );
+        assert_eq!(
             restored.pollution, 0.0,
             "旧セーブではpollutionは綺麗な状態(0.0)にfallbackするはず"
         );
@@ -350,6 +367,7 @@ mod tests {
             health_sfx_on: true,
             species_toggle: [true, false, true, false, true],
             feed_amount: 3,
+            max_fish_cap: 12,
             pollution: 42.5,
             purifier_concentration: 0.0,
             crab_toggle: false,
@@ -369,6 +387,7 @@ mod tests {
         assert!(restored.health_sfx_on);
         assert_eq!(restored.species_toggle, [true, false, true, false, true]);
         assert_eq!(restored.feed_amount, 3);
+        assert_eq!(restored.max_fish_cap, 12, "max_fish_capも往復するはず");
         assert_eq!(restored.pollution, 42.5);
         assert!(!restored.crab_toggle);
         assert_eq!(restored.speed_idx, 4);
@@ -415,6 +434,7 @@ mod tests {
             health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
+            max_fish_cap: crate::sim::MAX_FISH_CAP_UNLIMITED,
             pollution: 0.0,
             purifier_concentration: 0.0,
             crab_toggle: true,
@@ -459,6 +479,7 @@ mod tests {
             health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
+            max_fish_cap: crate::sim::MAX_FISH_CAP_UNLIMITED,
             pollution: 0.0,
             purifier_concentration: 0.0,
             crab_toggle: true,
@@ -507,6 +528,7 @@ mod tests {
             health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
+            max_fish_cap: crate::sim::MAX_FISH_CAP_UNLIMITED,
             pollution: 0.0,
             purifier_concentration: 0.0,
             crab_toggle: true,
@@ -554,6 +576,7 @@ mod tests {
             health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
+            max_fish_cap: crate::sim::MAX_FISH_CAP_UNLIMITED,
             pollution: 0.0,
             purifier_concentration: 0.6,
             crab_toggle: true,

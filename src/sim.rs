@@ -1029,6 +1029,11 @@ pub struct Simulation {
     pub species_toggle: [bool; 5],
     // 餌やり(`f`キー・自動餌やり共通)の投下量レベル(0..=4)。既定は1(従来どおりの量)。
     pub feed_amount: usize,
+    // 個体数上限のユーザー設定値。画面サイズから決まる動的MAX(capacity(w,h))を
+    // ユーザーがさらに引き下げるための値で、実効上限は常に
+    // capacity(w,h)とこの値の小さい方(effective_capacity参照)。既定は
+    // MAX_FISH_CAP_UNLIMITED(動的MAXそのまま=無制限相当)。設定画面から変更する。
+    pub max_fish_cap: usize,
     // 水質(0=綺麗〜POLLUTION_MAX=最悪)。堆積した食べ残し・病気・死亡個体の放置で
     // 悪化し、自然浄化で改善する。保存対象(state.jsonに保存し、次回起動時も継続)。
     pub pollution: f64,
@@ -1124,6 +1129,18 @@ pub fn capacity(pix_w: usize, pix_h: usize) -> usize {
 // スプライト拡大に伴い、上限自体も50→25に下げて画面の窮屈さを緩和した。
 pub const ADD_FISH_MANUAL_CAP: usize = 25;
 
+// `max_fish_cap`の既定値。画面サイズ由来の動的MAX(capacity(w,h))をそのまま使う
+// (=ユーザーによる追加の引き下げをしない)ことを表すセンチネル値。
+pub const MAX_FISH_CAP_UNLIMITED: usize = usize::MAX;
+
+// 実効個体数上限: 画面サイズ由来の動的MAX(capacity(w,h))と、ユーザー設定値
+// (max_fish_cap)の小さい方。産卵→孵化のcap判定・自動魚補充・`+`/`S`/`O`/`W`キーでの
+// 追加・seed_initial等、個体数上限を扱うすべての箇所はcapacity(w,h)を直接使わず
+// こちらを使うこと。
+pub fn effective_capacity(pix_w: usize, pix_h: usize, max_fish_cap: usize) -> usize {
+    capacity(pix_w, pix_h).min(max_fish_cap)
+}
+
 // `x.clamp(1.0, upper)` の upper が 1.0 未満(NaN含む)だと `min > max` で panic するため、
 // upper を必ず 1.0 以上に補正してから渡すための安全弁。
 // 端末が極端に小さく pix_w/pix_h が小さい場合の防御(main.rs 側の最小サイズ保証と二重で守る)。
@@ -1200,6 +1217,7 @@ impl Simulation {
             purifiers: Vec::new(),
             species_toggle: [true; 5],
             feed_amount: FEED_AMOUNT_DEFAULT,
+            max_fish_cap: MAX_FISH_CAP_UNLIMITED,
             pollution: 0.0,
             purifier_concentration: 0.0,
             crab_toggle: true,
@@ -1280,6 +1298,39 @@ impl Simulation {
         self.feed_amount = (self.feed_amount + 1) % FEED_AMOUNT_LEVELS;
     }
 
+    // 現在の画面サイズにおける実効個体数上限(capacity(w,h)とユーザー設定の小さい方)。
+    pub fn effective_cap(&self, pix_w: usize, pix_h: usize) -> usize {
+        effective_capacity(pix_w, pix_h, self.max_fish_cap)
+    }
+
+    // 設定画面表示用: 個体数上限設定の表示文字列。動的MAX(capacity(w,h))以上に
+    // なっていれば(既定値含む)「無制限」表示にする。
+    pub fn max_fish_cap_label(&self, pix_w: usize, pix_h: usize) -> String {
+        let dyn_max = capacity(pix_w, pix_h);
+        if self.max_fish_cap >= dyn_max {
+            format!("無制限(上限{dyn_max})")
+        } else {
+            format!("{}/{}", self.max_fish_cap, dyn_max)
+        }
+    }
+
+    // 設定画面から呼ぶ: 個体数上限のユーザー設定値をstep分だけ上げる。動的MAX
+    // (capacity(w,h))を超えては設定できないようクランプし、動的MAXに達したら
+    // 「無制限」(MAX_FISH_CAP_UNLIMITED)に戻す(画面が後で広くなった場合に
+    // 動的MAXへ追従させるため、具体的な数値のまま固定しない)。
+    pub fn increase_max_fish_cap(&mut self, pix_w: usize, pix_h: usize, step: usize) {
+        let dyn_max = capacity(pix_w, pix_h);
+        let current = self.effective_cap(pix_w, pix_h);
+        let next = current.saturating_add(step).min(dyn_max);
+        self.max_fish_cap = if next >= dyn_max { MAX_FISH_CAP_UNLIMITED } else { next };
+    }
+
+    // 設定画面から呼ぶ: 個体数上限のユーザー設定値をstep分だけ下げる(下限1)。
+    pub fn decrease_max_fish_cap(&mut self, pix_w: usize, pix_h: usize, step: usize) {
+        let current = self.effective_cap(pix_w, pix_h);
+        self.max_fish_cap = current.saturating_sub(step).max(1);
+    }
+
     // 設定画面から呼ぶ: カニの表示をトグルする。OFFにすると即座に全て消し、
     // ONに戻すと初期数(CRAB_COUNT)を再配置する。
     pub fn toggle_crabs(&mut self, pix_w: usize) {
@@ -1305,7 +1356,7 @@ impl Simulation {
         // 初期配置はピラニアを含めない通常種のみ(ピラニアの入手経路はSキーのみに限定する方針)。
         // species_toggleでOFFにした種は選ばれない(spawn_pool経由)。
         let pool = self.spawn_pool();
-        let cap = capacity(pix_w, pix_h);
+        let cap = self.effective_cap(pix_w, pix_h);
 
         // 水槽が極端に小さくつがい(2匹)すら入らない場合は、空にしないよう1匹だけ配置する。
         if cap < 2 {
@@ -1905,7 +1956,7 @@ impl Simulation {
             self.set_message("これ以上は孵化でしか増えません");
             return;
         }
-        if self.living_count() >= capacity(pix_w, pix_h) {
+        if self.living_count() >= self.effective_cap(pix_w, pix_h) {
             self.set_message("水槽が満員です");
             return;
         }
@@ -1960,7 +2011,7 @@ impl Simulation {
             self.set_message("これ以上は孵化でしか増えません");
             return;
         }
-        if self.living_count() >= capacity(pix_w, pix_h) {
+        if self.living_count() >= self.effective_cap(pix_w, pix_h) {
             self.set_message("水槽が満員です");
             return;
         }
@@ -2182,7 +2233,12 @@ impl Simulation {
                 self.message = None;
             }
         }
-        let cap = capacity(pix_w, pix_h);
+        // 過密判定(病気の発症確率)は画面サイズ由来の動的MAXをそのまま使う(ユーザーが
+        // 個体数上限を引き下げても、見た目の窮屈さとは無関係な過密ペナルティが早まらない
+        // ようにするため)。一方、孵化のcap判定(update_biology内)は実効上限
+        // (effective_cap。動的MAXとユーザー設定の小さい方)を使う。
+        let dyn_cap = capacity(pix_w, pix_h);
+        let cap = self.effective_cap(pix_w, pix_h);
         // sand_height は pix_h に対して最大2までしか保証しないため、pix_h が極端に小さいと
         // sand_top が 0 以下になり得る。水面〜水底の描画領域として最低2px は確保する。
         let sand_top = (pix_h as f64 - sand_height(pix_h) as f64).max(2.0);
@@ -2206,7 +2262,7 @@ impl Simulation {
         self.update_purifiers(dt, sand_top, pix_w);
         self.update_stars(dt);
         self.update_cameos(dt, pix_w as f64, sand_top);
-        self.update_biology(dt, cap, pix_w as f64, sand_top);
+        self.update_biology(dt, dyn_cap, cap, pix_w as f64, sand_top);
         // クジラの死骸が着地後WHALE_EXPLOSION_DELAYを超えていたら大爆発させる。
         // update_biology側のループ内では死骸1体のみを&mutで借用しているため、
         // fish配列全体を書き換える大爆発処理は借用が終わった後のこのタイミングで行う。
@@ -3774,11 +3830,13 @@ impl Simulation {
     }
 
     // 育成: 空腹度減少・病気の発症/進行・成長・産卵・孵化・死亡(演出付き)
-    fn update_biology(&mut self, dt: f64, cap: usize, w: f64, sand_top: f64) {
+    // dyn_cap=画面サイズ由来の動的MAX(過密判定に使う)、cap=実効上限(動的MAXと
+    // ユーザー設定の小さい方。孵化のcap判定に使う)。
+    fn update_biology(&mut self, dt: f64, dyn_cap: usize, cap: usize, w: f64, sand_top: f64) {
         // 過密判定・孵化の上限ゲートは、死んで浮いている個体(dead)を除いた
         // 「生きている」個体数を基準にする。居座る死骸が繁殖を止めないようにするため。
         let living = self.living_count();
-        let overcrowded = living as f64 >= cap as f64 * OVERCROWD_RATIO;
+        let overcrowded = living as f64 >= dyn_cap as f64 * OVERCROWD_RATIO;
         // 水質が悪いほど病気の発症確率を上げる(水質最悪でPOLLUTION_SICK_CHANCE_MAX_MULT倍)。
         let pollution_sick_mult =
             1.0 + (self.pollution / POLLUTION_MAX) * (POLLUTION_SICK_CHANCE_MAX_MULT - 1.0);
@@ -9961,6 +10019,214 @@ mod tests {
         assert!(capacity(1000, 800) <= 100, "上限は100匹");
         assert_eq!(capacity(1000, 800), 100, "十分大きい端末では100匹に到達する");
         assert!(capacity(200, 100) >= capacity(80, 40));
+    }
+
+    // --- 個体数上限のユーザー設定(max_fish_cap)関連 ---
+
+    #[test]
+    fn effective_cap_defaults_to_the_dynamic_max() {
+        // 既定値(MAX_FISH_CAP_UNLIMITED)では、実効上限は動的MAX(capacity(w,h))そのまま。
+        let (w, h) = (800, 200);
+        let sim = Simulation::new(Rng::new(200));
+        assert_eq!(sim.max_fish_cap, MAX_FISH_CAP_UNLIMITED);
+        assert_eq!(sim.effective_cap(w, h), capacity(w, h));
+    }
+
+    #[test]
+    fn increase_max_fish_cap_cannot_exceed_the_dynamic_max() {
+        // 動的MAXを超えて設定できないようにクランプされること。何度増やしても
+        // 動的MAX止まりで、内部的には「無制限」に戻る(将来端末が広がった場合に
+        // 追従できるように具体的な数値へ固定しない)。
+        let (w, h) = (800, 200);
+        let dyn_max = capacity(w, h);
+        let mut sim = Simulation::new(Rng::new(201));
+        for _ in 0..(dyn_max + 20) {
+            sim.increase_max_fish_cap(w, h, 1);
+        }
+        assert_eq!(sim.effective_cap(w, h), dyn_max, "実効上限は動的MAXで頭打ちのはず");
+        assert_eq!(
+            sim.max_fish_cap, MAX_FISH_CAP_UNLIMITED,
+            "動的MAXに達したら無制限扱いに戻るはず"
+        );
+    }
+
+    #[test]
+    fn decrease_max_fish_cap_is_clamped_to_a_minimum_of_one() {
+        // 1未満には下げられないこと。
+        let (w, h) = (800, 200);
+        let mut sim = Simulation::new(Rng::new(202));
+        for _ in 0..200 {
+            sim.decrease_max_fish_cap(w, h, 5);
+        }
+        assert_eq!(sim.effective_cap(w, h), 1, "実効上限は1未満にはならないはず");
+    }
+
+    #[test]
+    fn effective_capacity_takes_the_smaller_of_dynamic_max_and_user_setting() {
+        let (w, h) = (800, 200);
+        let dyn_max = capacity(w, h);
+        assert!(dyn_max > 10, "テスト前提: 動的MAXは10より大きいこと");
+        // ユーザー設定が動的MAXより小さい場合はユーザー設定が優先される
+        assert_eq!(effective_capacity(w, h, 10), 10);
+        // ユーザー設定が動的MAXより大きい(無制限含む)場合は動的MAXが優先される
+        assert_eq!(effective_capacity(w, h, MAX_FISH_CAP_UNLIMITED), dyn_max);
+        assert_eq!(effective_capacity(w, h, dyn_max + 1000), dyn_max);
+    }
+
+    #[test]
+    fn add_fish_stops_at_the_lowered_user_cap_even_with_room_in_dynamic_capacity() {
+        // +キー: 動的MAX(画面サイズ由来)には余裕があっても、ユーザー設定(max_fish_cap)
+        // を下げていればそちらで頭打ちになること。
+        let (w, h) = (800, 200);
+        let dyn_max = capacity(w, h);
+        let mut sim = Simulation::new(Rng::new(203));
+        sim.max_fish_cap = 5;
+        assert!(dyn_max > 5, "テスト前提: 動的MAXはユーザー設定より大きいこと");
+        for _ in 0..(ADD_FISH_MANUAL_CAP.min(dyn_max) + 5) {
+            sim.add_fish(w, h);
+        }
+        assert_eq!(
+            sim.fish_count(),
+            5,
+            "+キーでの追加はユーザー設定の個体数上限で頭打ちになるはず"
+        );
+    }
+
+    #[test]
+    fn auto_replenish_stops_at_the_lowered_user_cap() {
+        // 自動魚補充(Aキー): ユーザー設定の個体数上限に達していれば補充しないこと。
+        let (w, h) = (800, 200);
+        let mut sim = Simulation::new(Rng::new(204));
+        sim.max_fish_cap = 2;
+        // 自動補充の対象になる通常種を、既にユーザー設定の上限ちょうどまで用意する。
+        for i in 0..2 {
+            sim.fish
+                .push(Fish::new(Species::Neon, Stage::Adult, 10.0 + i as f64, 10.0));
+        }
+        let before = sim.fish_count();
+        for _ in 0..10 {
+            sim.update_auto_replenish(0.5, w, h);
+        }
+        assert_eq!(
+            sim.fish_count(),
+            before,
+            "ユーザー設定の個体数上限に達していれば自動補充されないはず"
+        );
+    }
+
+    #[test]
+    fn egg_does_not_hatch_when_at_the_lowered_user_cap_even_below_dynamic_capacity() {
+        // 産卵→孵化: 動的MAXにはまだ余裕があっても、ユーザー設定(max_fish_cap)の
+        // 実効上限に達していれば孵化しないこと。
+        let (w, h) = (800, 200);
+        let dyn_max = capacity(w, h);
+        let mut sim = Simulation::new(Rng::new(205));
+        sim.max_fish_cap = 3;
+        assert!(dyn_max > 3, "テスト前提: 動的MAXはユーザー設定より大きいこと");
+        for i in 0..3 {
+            sim.fish
+                .push(Fish::new(Species::Neon, Stage::Adult, 10.0 + i as f64, 10.0));
+        }
+        sim.eggs.push(Egg {
+            x: 40.0,
+            y: (h as f64 - sand_height(h) as f64 - 1.0).max(1.0),
+            species: Species::Neon,
+            hatch: 0.05,
+        });
+        sim.update(0.1, w, h);
+        assert_eq!(
+            sim.fish_count(),
+            3,
+            "ユーザー設定の実効上限では動的MAXに余裕があっても孵化しないはず"
+        );
+        assert!(sim.eggs.is_empty(), "孵化できない卵も消えるはず");
+    }
+
+    #[test]
+    fn seed_initial_respects_the_lowered_user_cap() {
+        // seed_initial: ユーザー設定の実効上限を超えて初期個体を撒かないこと。
+        let (w, h) = (800, 200);
+        let mut sim = Simulation::new(Rng::new(206));
+        sim.max_fish_cap = 4;
+        sim.seed_initial(w, h);
+        assert!(
+            sim.fish_count() <= 4,
+            "初期個体数はユーザー設定の実効上限を超えないはず: {}",
+            sim.fish_count()
+        );
+    }
+
+    #[test]
+    fn lowering_cap_below_current_living_count_blocks_new_additions_without_removing_existing_fish() {
+        // 既に生存数が新しい実効上限を超えている状態でも、既存個体を強制的に
+        // 減らすことはせず、単に新規追加(+キー・自動補充・孵化)だけを止めること。
+        let (w, h) = (800, 200);
+        let mut sim = Simulation::new(Rng::new(207));
+        // まず余裕を持って10匹用意する(この時点ではmax_fish_capは既定の無制限)。
+        // 自動補充の対象になる通常種(Neon)は2匹だけにして、AUTO_REPLENISH_THRESHOLD(3)
+        // 以下という補充条件自体は満たしつつ、それでもcapで補充がブロックされることを
+        // 検証できるようにする(通常種を10匹にすると補充条件自体を満たさなくなり、
+        // capのブロックを検証できないため)。
+        for i in 0..2 {
+            sim.fish
+                .push(Fish::new(Species::Neon, Stage::Adult, 10.0 + i as f64, 10.0));
+        }
+        for i in 0..8 {
+            sim.fish
+                .push(Fish::new(Species::Piranha, Stage::Adult, 30.0 + i as f64, 10.0));
+        }
+        let before = sim.fish_count();
+        assert_eq!(before, 10);
+
+        // その後、ユーザーが実効上限を現在の生存数より低く設定する。
+        sim.max_fish_cap = 3;
+        assert!(
+            sim.living_count() > sim.effective_cap(w, h),
+            "テスト前提: 生存数が新しい実効上限を超えていること"
+        );
+
+        // 既存個体は減らされない。
+        assert_eq!(
+            sim.fish_count(),
+            before,
+            "実効上限を下げただけで既存個体が強制的に減らされてはいけない"
+        );
+
+        // +キーでの追加は一切できない。
+        sim.add_fish(w, h);
+        assert_eq!(sim.fish_count(), before, "+キーでの追加は一切できないはず");
+
+        // 自動補充も起きない。
+        sim.update_auto_replenish(0.5, w, h);
+        assert_eq!(sim.fish_count(), before, "自動補充も起きないはず");
+
+        // 産卵→孵化も起きない。
+        sim.eggs.push(Egg {
+            x: 40.0,
+            y: (h as f64 - sand_height(h) as f64 - 1.0).max(1.0),
+            species: Species::Neon,
+            hatch: 0.05,
+        });
+        sim.update(0.1, w, h);
+        assert_eq!(sim.fish_count(), before, "孵化も起きないはず");
+        assert!(sim.eggs.is_empty(), "孵化できない卵も消えるはず");
+
+        // 生存数が実効上限未満に減れば、また増やせるようになる。
+        sim.fish.truncate(2); // 生存数を2匹(実効上限3未満)まで減らす
+        sim.add_fish(w, h);
+        assert_eq!(sim.fish_count(), 3, "生存数が実効上限未満に減れば再び追加できるはず");
+    }
+
+    #[test]
+    fn max_fish_cap_label_shows_unlimited_at_or_above_the_dynamic_max() {
+        let (w, h) = (800, 200);
+        let dyn_max = capacity(w, h);
+        let mut sim = Simulation::new(Rng::new(208));
+        assert!(sim.max_fish_cap_label(w, h).contains("無制限"));
+        sim.max_fish_cap = dyn_max; // 具体的な数値でも動的MAXと同じなら無制限表示
+        assert!(sim.max_fish_cap_label(w, h).contains("無制限"));
+        sim.max_fish_cap = dyn_max - 1;
+        assert!(!sim.max_fish_cap_label(w, h).contains("無制限"));
     }
 
     // 回帰テスト: 疑似端末等で極端に小さい pix_w/pix_h が渡されても
