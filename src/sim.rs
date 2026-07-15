@@ -1917,6 +1917,20 @@ impl Simulation {
         self.set_message("全員を空腹にした(デバッグ)");
     }
 
+    // デバッグ用: 生きている全ての稚魚(Stage::Fry)を即座に成魚(Stage::Adult)にする。
+    // 通常の成長遷移(update_biology)と同じくwell_fed_timerを0にリセットする。
+    pub fn debug_grow_all_to_adult(&mut self) {
+        let mut count = 0;
+        for f in &mut self.fish {
+            if !f.dead && f.stage == Stage::Fry {
+                f.stage = Stage::Adult;
+                f.well_fed_timer = 0.0;
+                count += 1;
+            }
+        }
+        self.set_message(format!("稚魚{count}匹を成魚にした(デバッグ)"));
+    }
+
     // デバッグ用: 水質(pollution)を押すたびに0とPOLLUTION_MAXの間でトグルする。
     // 水質悪化の見た目・病気連動をすぐ試したい時のショートカット。
     pub fn debug_toggle_pollution(&mut self) {
@@ -8816,6 +8830,30 @@ mod tests {
         sim.fish.push(f);
         sim.debug_kill_random_fish(); // パニックしないことを確認する
         assert!(sim.fish[0].dead);
+    }
+
+    #[test]
+    fn debug_grow_all_to_adult_matures_every_living_fry_but_leaves_dead_and_adults_alone() {
+        let mut sim = Simulation::new(Rng::new(956));
+        let mut fry1 = Fish::new(Species::Neon, Stage::Fry, 10.0, 10.0);
+        fry1.well_fed_timer = 12.0;
+        sim.fish.push(fry1);
+        let mut fry2 = Fish::new(Species::Goldfish, Stage::Fry, 12.0, 10.0);
+        fry2.well_fed_timer = 3.0;
+        sim.fish.push(fry2);
+        let mut dead_fry = Fish::new(Species::Guppy, Stage::Fry, 14.0, 10.0);
+        dead_fry.dead = true;
+        sim.fish.push(dead_fry);
+        let adult = Fish::new(Species::Betta, Stage::Adult, 16.0, 10.0);
+        sim.fish.push(adult);
+
+        sim.debug_grow_all_to_adult();
+
+        assert_eq!(sim.fish[0].stage, Stage::Adult, "生きている稚魚1匹目は成魚になるはず");
+        assert_eq!(sim.fish[0].well_fed_timer, 0.0, "通常の成長遷移と同じくタイマーはリセットされるはず");
+        assert_eq!(sim.fish[1].stage, Stage::Adult, "生きている稚魚2匹目も成魚になるはず");
+        assert_eq!(sim.fish[2].stage, Stage::Fry, "死亡演出中の個体は対象外のはず");
+        assert_eq!(sim.fish[3].stage, Stage::Adult, "既に成魚の個体はそのままのはず");
     }
 
     #[test]

@@ -541,6 +541,8 @@ fn handle_key(
         KeyCode::Char('-') => sim.remove_fish(),
         // デバッグ用: 全員を一発で空腹にする(この要望への対応)
         KeyCode::Char('H') => sim.debug_starve_all(),
+        // デバッグ用: 生きている全ての稚魚を即座に成魚にする
+        KeyCode::Char('G') => sim.debug_grow_all_to_adult(),
         // デバッグ用: 産卵可能な同種ペアを即座に交尾成立(ハート+卵)させる
         KeyCode::Char('K') => sim.debug_force_courtship_proximity(fb.pix_width(), fb.pix_height()),
         // デバッグ用: 水質を0とMAXの間でトグルする
@@ -1734,7 +1736,7 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "",
         "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
         "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / C 浄化剤 / D タコつぼ / P 水草",
-        "          H 全員空腹に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
+        "          H 全員空腹に / G 全稚魚を成魚に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
         "          J 水質トグル / X ランダム死亡 / Z スター投入 / L 寿命残り10秒(いずれもデバッグ)",
         "",
         "  注意: 浄化剤(C)は着水後すぐ水質が下がるが、薄まりきる(約10分)まで",
