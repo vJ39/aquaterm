@@ -499,32 +499,44 @@ impl Sprite {
         // 精細化して描き直した(ヒレ('F')・眼('E')・体の帯('A')が見て取れる解像度)。
         // 新種(エンゼルフィッシュ・ベタ・タコ)も同じ解像度感で追加する。
         let lines: &[&str] = match (species, stage) {
-            (Species::Neon, Stage::Fry) => &["..FFF..", ".BBBBB.", "<BBABBE", ".BBBBB.", "..FFF.."],
+            // ネオン・グッピーのシルエットを「もっとシュッと(streamlined)させたい」
+            // という要望を受けて描き直した(2026/07/16)。過去に金魚・ベタで
+            // 「尾ビレ(菱形)と胴体(丸)を別々の塊として点でつなぐ」構成にして
+            // 不評だった反省を踏まえ、今回は必ず一続きの輪郭(体から尾へ滑らかに
+            // テーパーする紡錘形)で描く。尾は胴体の幅が列ごとに連続的に狭まって
+            // いった先に生える切れ込み(フォーク)として表現し、独立した塊を後から
+            // 接着しない。ネオンテトラは体高がありつつも尾に向けて素早く絞り込む
+            // 魚雷型で、尾の切れ込みは浅いフォーク、体側には太いアクセント帯(A)を
+            // 面で塗って通す。
+            (Species::Neon, Stage::Fry) => &[
+                "FF.BB....",
+                ".FBBBBB..",
+                "..BAABBBE",
+                ".FBBBBB..",
+                "FF.BB....",
+            ],
             // 成長段階が上がって大きく表示されるほど、低解像度パターンの拡大では
             // 模様が潰れて間延びする。BIG_ADULT_GROWTH_STAGE以降は、同じ紡錘形の
-            // 構図を一回り高い解像度で描き直した専用パターンに切り替える。魚雷型の
-            // 体・左の尾・右の目はそのままに、水色のアクセント帯を中央2行に太く
-            // 通して見えやすくする。
+            // 構図を一回り高い解像度で描き直した専用パターンに切り替える。
             (Species::Neon, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
-                "......FFFFF.......",
-                "...BBBBBBBBBBBB...",
-                "..BBBBBBBBBBBBBB..",
-                "<BBBBBBBBBBBBBBBB.",
-                "<<BBBBAAAAAAABBBBE",
-                "<<BBBBAAAAAAABBBBE",
-                "<BBBBBBBBBBBBBBBB.",
-                "..BBBBBBBBBBBBBB..",
-                "...BBBBBBBBBBBB...",
-                "......FFFFF.......",
+                "FF....FFFF........",
+                "FFF.BBBBBBBB......",
+                ".FFBBBBBBBBBBB....",
+                "..FBBBAAAAAABBBB..",
+                "...BBBAAAAAABBBBBE",
+                "..FBBBAAAAAABBBB..",
+                ".FFBBBBBBBBBBB....",
+                "FFF.BBBBBBBB......",
+                "FF....FFFF........",
             ],
             (Species::Neon, Stage::Adult) => &[
-                ".....FFF.....",
-                "...BBBBBBB...",
-                "<<BBBBBBBBB..",
-                "<BBBAAABBBBBE",
-                "<<BBBBBBBBB..",
-                "...BBBBBBB...",
-                ".....FFF.....",
+                "FF...BBB......",
+                ".FF.BBBBBB....",
+                "..FBBAAAAABB..",
+                "...BBAAAAABBBE",
+                "..FBBAAAAABB..",
+                ".FF.BBBBBB....",
+                "FF...BBB......",
             ],
             (Species::Goldfish, Stage::Fry) => &[
                 "..FFFF..",
@@ -568,40 +580,42 @@ impl Sprite {
                 "....FFBBBB......",
                 "......FF........",
             ],
-            (Species::Guppy, Stage::Fry) => &["..FF..", ".BBBB.", "<BABBE", ".BBBB.", "..FF.."],
-            // グッピーの見た目をもっと可愛くしてほしいという要望を受けて
-            // 描き直した。旧パターンは尾が体と同色('<')で見た目に溶け込んでおり、
-            // 蝶ネクタイのような輪郭になっていた。グッピーらしい大きく広がる
-            // 扇状の尾びれ(F)を左側にはっきり配置し、体は小さく丸くまとめた。
-            // 体側のライン(A)がほぼ2ドットしかなく見えづらいとの指摘を受けて、
-            // 体高がある行の幅いっぱいに伸ばし、体側を横切るはっきりした
-            // 一本のラインとして見えるようにした。
+            // ネオンと同じ理由(2026/07/16)でグッピーも描き直した。グッピー最大の
+            // 特徴である扇状の尾ビレは、胴体側から列ごとに幅がなめらかに増えていく
+            // 一枚のウェッジ(くさび形)として描き、独立した扇の塊を体へ点で接着する
+            // 構成には絶対にしない。尾から頭まで幅が単調に変化する一続きの輪郭を
+            // 保つことで、体高の高い扇尾と細い胴体が自然に繋がって見える。
+            (Species::Guppy, Stage::Fry) => &[
+                "FF.B....",
+                "FFFBBB..",
+                "FFFBABBE",
+                "FFFBBB..",
+                "FF.B....",
+            ],
             // BIG_ADULT_GROWTH_STAGE以降は高解像度の専用パターンに切り替える。
-            // 左に大きく広がる扇状の尾びれ(F)、小さく丸い体(B)、右の目(E)という
-            // グッピーらしいシルエットを保ちつつ、体側を横切るアクセントの
-            // 一本線(A)を広い体高いっぱいに伸ばしてはっきり見せる。
             (Species::Guppy, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
-                "....FFF.........",
-                "..FFFBBBB.......",
-                ".FFBBBBBBB......",
-                "FFBBBBBBBBB.....",
-                "FBBBBBBBBBBB....",
-                "FBBAAAAAAAAB.E..",
-                "FBBBBBBBBBBB....",
-                "FFBBBBBBBBB.....",
-                ".FFBBBBBBB......",
-                "..FFFBBBB.......",
-                "....FFF.........",
+                "FF......FF..........",
+                "FFFF...BBBBB........",
+                "FFFFFBBBBBBBBB......",
+                "FFFFFBBBBBBBBBBB....",
+                "FFFFFBBAAAABBBBBBB..",
+                "FFFFFBBAAAABBBBBBBBE",
+                "FFFFFBBAAAABBBBBBB..",
+                "FFFFFBBBBBBBBBBB....",
+                "FFFFFBBBBBBBBB......",
+                "FFFF...BBBBB........",
+                "FF......FF..........",
             ],
             (Species::Guppy, Stage::Adult) => &[
-                "...FF.......",
-                "..FBBBF.....",
-                ".FBBBBBF....",
-                "FFBAAAAAAB.E",
-                ".FBBBBBF....",
-                "..FBBBF.....",
-                "...FF.......",
-                "....F.......",
+                "FF.....FF.......",
+                "FFFF..BBBBB.....",
+                "FFFFFBBBBBBBB...",
+                "FFFFFBAAAAABBB..",
+                "FFFFFBAAAAABBBBE",
+                "FFFFFBAAAAABBB..",
+                "FFFFFBBBBBBBB...",
+                "FFFF..BBBBB.....",
+                "FF.....FF.......",
             ],
             // ピラニアらしく見えず卵型のUFOに見えるという指摘を受けて、
             // 背びれが体から連続的に伸びる紡錘形のシルエットに描き直した(背びれが
