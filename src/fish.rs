@@ -901,6 +901,13 @@ fn palette(species: Species) -> Palette {
     }
 }
 
+// 種ごとのヒレ('F')色を返す。Sprite::pixelsは解決済みの色しか持たないため、
+// 描画側(main.rs)でヒレピクセルかどうかを判別したいとき、このパレット色と
+// 一致するかどうかで判定する(Spriteにフラグを追加する大掛かりな変更を避けるため)。
+pub fn fin_color(species: Species) -> Color {
+    palette(species).fin
+}
+
 // --- 観賞用の追加生物(育成ロジックには参加しない。見た目の賑やかしのみ) ---
 
 // カニのスプライト。水底を歩くだけの観賞用(育成ロジック対象外)。
