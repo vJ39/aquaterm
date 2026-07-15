@@ -64,6 +64,14 @@ pub struct SavedState {
     pub auto_replenish_on: bool,
     #[serde(default = "default_true")]
     pub bubble_sfx_on: bool,
+    // 気泡音に続く個別トグルの拡張(捕食系・投下系・状態通知系)。旧セーブには
+    // キーが無いため、Ctl::new()と同じ既定のtrue(従来の常時鳴る挙動)にfallbackする。
+    #[serde(default = "default_true")]
+    pub predation_sfx_on: bool,
+    #[serde(default = "default_true")]
+    pub drop_sfx_on: bool,
+    #[serde(default = "default_true")]
+    pub health_sfx_on: bool,
     // 生み出す魚の種類のトグル(Species::COMMONと同じ並び順)。
     #[serde(default = "default_species_toggle")]
     pub species_toggle: [bool; 5],
@@ -149,6 +157,9 @@ pub fn save(sim: &Simulation, ctl: &crate::Ctl) -> std::io::Result<()> {
         day_night_on: ctl.day_night_on,
         auto_replenish_on: ctl.auto_replenish_on,
         bubble_sfx_on: ctl.bubble_sfx_on,
+        predation_sfx_on: ctl.predation_sfx_on,
+        drop_sfx_on: ctl.drop_sfx_on,
+        health_sfx_on: ctl.health_sfx_on,
         species_toggle: sim.species_toggle,
         feed_amount: sim.feed_amount,
         pollution: sim.pollution,
@@ -188,6 +199,9 @@ pub fn restore_into(sim: &mut Simulation, ctl: &mut crate::Ctl, state: SavedStat
     ctl.day_night_on = state.day_night_on;
     ctl.auto_replenish_on = state.auto_replenish_on;
     ctl.bubble_sfx_on = state.bubble_sfx_on;
+    ctl.predation_sfx_on = state.predation_sfx_on;
+    ctl.drop_sfx_on = state.drop_sfx_on;
+    ctl.health_sfx_on = state.health_sfx_on;
     // SPEED_STEPSの要素数が将来変わっても範囲外インデックスでpanicしないよう頭打ちにする。
     ctl.speed_idx = state.speed_idx.min(crate::SPEED_STEPS.len() - 1);
 }
@@ -229,6 +243,9 @@ mod tests {
             day_night_on: true,
             auto_replenish_on: false,
             bubble_sfx_on: true,
+            predation_sfx_on: true,
+            drop_sfx_on: true,
+            health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
             pollution: 0.0,
@@ -274,6 +291,9 @@ mod tests {
         assert!(restored.day_night_on, "旧セーブではday_night_onは既定のtrueにfallbackするはず");
         assert!(!restored.auto_replenish_on, "旧セーブではauto_replenish_onは既定のfalseにfallbackするはず");
         assert!(restored.bubble_sfx_on, "旧セーブではbubble_sfx_onは既定のtrueにfallbackするはず");
+        assert!(restored.predation_sfx_on, "旧セーブではpredation_sfx_onは既定のtrueにfallbackするはず");
+        assert!(restored.drop_sfx_on, "旧セーブではdrop_sfx_onは既定のtrueにfallbackするはず");
+        assert!(restored.health_sfx_on, "旧セーブではhealth_sfx_onは既定のtrueにfallbackするはず");
         assert_eq!(
             restored.species_toggle,
             [true; 5],
@@ -325,6 +345,9 @@ mod tests {
             day_night_on: false,
             auto_replenish_on: true,
             bubble_sfx_on: false,
+            predation_sfx_on: true,
+            drop_sfx_on: false,
+            health_sfx_on: true,
             species_toggle: [true, false, true, false, true],
             feed_amount: 3,
             pollution: 42.5,
@@ -341,6 +364,9 @@ mod tests {
         assert!(!restored.day_night_on);
         assert!(restored.auto_replenish_on);
         assert!(!restored.bubble_sfx_on);
+        assert!(restored.predation_sfx_on);
+        assert!(!restored.drop_sfx_on);
+        assert!(restored.health_sfx_on);
         assert_eq!(restored.species_toggle, [true, false, true, false, true]);
         assert_eq!(restored.feed_amount, 3);
         assert_eq!(restored.pollution, 42.5);
@@ -384,6 +410,9 @@ mod tests {
             day_night_on: true,
             auto_replenish_on: false,
             bubble_sfx_on: true,
+            predation_sfx_on: true,
+            drop_sfx_on: true,
+            health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
             pollution: 0.0,
@@ -425,6 +454,9 @@ mod tests {
             day_night_on: true,
             auto_replenish_on: false,
             bubble_sfx_on: true,
+            predation_sfx_on: true,
+            drop_sfx_on: true,
+            health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
             pollution: 0.0,
@@ -470,6 +502,9 @@ mod tests {
             day_night_on: true,
             auto_replenish_on: false,
             bubble_sfx_on: true,
+            predation_sfx_on: true,
+            drop_sfx_on: true,
+            health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
             pollution: 0.0,
@@ -514,6 +549,9 @@ mod tests {
             day_night_on: true,
             auto_replenish_on: false,
             bubble_sfx_on: true,
+            predation_sfx_on: true,
+            drop_sfx_on: true,
+            health_sfx_on: true,
             species_toggle: [true; 5],
             feed_amount: 1,
             pollution: 0.0,
