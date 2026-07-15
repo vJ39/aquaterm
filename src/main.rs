@@ -466,6 +466,8 @@ fn handle_key(
         KeyCode::Char('m') => sim.medicate(ctl.cursor_x, fb.pix_width()),
         // ピラニア専用の肉餌(自動モードには絶対に組み込まない、キー入力専用の操作)
         KeyCode::Char('M') => sim.drop_meat(ctl.cursor_x, fb.pix_width()),
+        // 浄化剤(自動モードには組み込まない、キー入力専用の操作)
+        KeyCode::Char('C') => sim.drop_purifier(ctl.cursor_x, fb.pix_width()),
         KeyCode::Char('t') => sim.knock(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
         KeyCode::Char('T') => sim.tap_attract(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
         KeyCode::Char('p') => {
@@ -742,6 +744,26 @@ fn render_tank(
         );
     }
 
+    // 浄化ブルーム(浄化剤の着水演出): 墨と同じ「同心円状に勢いよく広がって薄れて消える」
+    // 構造を再利用し、明るく清潔感のある水色(墨の黒・血の赤とは対照的な色)で描く。
+    let bloom_tint = Color::new(140, 235, 230);
+    for b in &sim.purify_blooms {
+        draw_spreading_stain(
+            fb,
+            b.x,
+            b.y,
+            b.life,
+            b.max_life,
+            sim::PURIFY_BLOOM_GROWTH_TIME,
+            sim::PURIFY_BLOOM_MAX_RADIUS,
+            sim::PURIFY_BLOOM_HOLD_FRACTION,
+            sim::PURIFY_BLOOM_MIX,
+            bloom_tint,
+            w,
+            h,
+        );
+    }
+
     // 水流の筋(可視化演出): 淡い青白の短い横線を、背景に薄く溶かして描く(はっきりした
     // 実線ではなく、水が流れる揺らめきとして読めるようにする)。生成直後と消滅間際で薄く、
     // 中間で最も濃くなる三角フェードにし、血飛沫・墨と同じく背景色へのlerpで混ぜる。
@@ -843,6 +865,11 @@ fn render_tank(
         } else {
             put(fb, mt.x, mt.y, meat_color, w, h);
         }
+    }
+    // 浄化剤(沈下中のみ。着水すると即座に効果を発動して消えるため、堆積表示は無い)
+    let purifier_color = Color::new(120, 230, 220);
+    for p in &sim.purifiers {
+        put(fb, p.x, p.y, purifier_color, w, h);
     }
 
     // スター(無敵アイテム): キラキラ点滅する十字型。触れた魚が一定時間無敵化する。
@@ -947,7 +974,7 @@ fn render_tank(
         // 生命残りゲージをまとめて表示する(v キーでON/OFF)。拡大表示分の高さも
         // 踏まえ、拡大後のスプライト上端(top)基準で描く。
         if overlay_on {
-            draw_status_overlay(fb, f, top, w, h);
+            draw_status_overlay(fb, f, top, w, h, sim.elapsed);
         }
     }
 }
@@ -966,7 +993,7 @@ fn sprite_dense(sprite: &fish::Sprite) -> Vec<Option<Color>> {
 
 // ステータスオーバーレイ: 生命残りゲージ(数セグメントの横棒)+腹ペコ/病気フラグを
 // スプライト直上の1行に描く。画面外にはみ出す分は put() が無視する。
-fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usize, h: usize) {
+fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usize, h: usize, elapsed: f64) {
     let meter_y = sprite_top as f64 - 1.0;
     let half = (GAUGE_SEGMENTS as f64 - 1.0) / 2.0;
 
@@ -1006,17 +1033,29 @@ fn draw_status_overlay(fb: &mut FrameBuffer, f: &Fish, sprite_top: isize, w: usi
     } else if f.piranha_bite_count == 1 {
         put(fb, f.x + half + 3.0, meter_y, WOUNDED_FLAG, w, h);
     }
-    // 寿命間近フラグ: 負傷フラグのさらに右に、老衰死までの残り時間が短い個体だけ表示する
+    // 寿命間近フラグ: 他のフラグに紛れて見落とされるとの指摘を受け、小さな1ドットの
+    // 色違いではなく、頭上のゲージ行全体を高速に点滅させる派手な警告表示にする
     // (Lキーのデバッグショートカット等で寿命を詰めた個体がひと目で分かるようにする)。
     let remaining_lifespan = sim::LIFESPAN_DEATH_AGE * f.lifespan_mult - f.age;
     if remaining_lifespan <= ELDERLY_WARNING_SECS {
-        put(fb, f.x + half + 4.0, meter_y, ELDERLY_FLAG, w, h);
+        let blink_on = (elapsed * ELDERLY_BLINK_FREQ).sin() > 0.0;
+        if blink_on {
+            for i in 0..GAUGE_SEGMENTS {
+                let gx = f.x + (i as f64 - half);
+                put(fb, gx, meter_y, ELDERLY_FLAG, w, h);
+            }
+            put(fb, f.x - half - 1.0, meter_y, ELDERLY_FLAG, w, h);
+            put(fb, f.x + half + 1.0, meter_y, ELDERLY_FLAG, w, h);
+        }
     }
 }
 
 // 寿命間近フラグを表示する残り時間のしきい値。Lキー(debug_age_random_fish_near_death)が
 // 残り10秒に設定するので、少し余裕を持たせてすぐ確認できるようにする。
 const ELDERLY_WARNING_SECS: f64 = 15.0;
+// 寿命間近フラグの点滅速度(高いほど速く点滅する)。目立たせるため無敵時のブリンク
+// (INVINCIBLE_BLINK_FREQ)よりさらに速くする。
+const ELDERLY_BLINK_FREQ: f64 = 12.0;
 
 // 投下エフェクト(餌/薬を投げた瞬間の光/波紋)を描く。中心の一瞬の光→広がるリングの順で、
 // 1秒未満で消える。餌と薬で色を変え、何をどこに投げたか一目でわかるようにする。
@@ -1105,6 +1144,8 @@ fn draw_drop_effect(fb: &mut FrameBuffer, e: &sim::DropEffect, w: usize, h: usiz
         sim::EffectKind::Tap => Color::new(255, 195, 205),
         // 肉餌(Mキー): 生肉らしい濃い赤身の色にし、餌(暖色)・薬(緑)と見分けられるようにする。
         sim::EffectKind::Meat => Color::new(200, 60, 60),
+        // 浄化剤(Cキー): 清潔感のある明るいシアン/ターコイズ。餌・薬・肉餌と見分けられる色。
+        sim::EffectKind::Purify => Color::new(80, 220, 210),
         // つがいの交尾: ハートらしい鮮やかなピンク(Spawnと同じキラキラ演出を使い回す)。
         sim::EffectKind::Mate => Color::new(255, 110, 160),
         // 孵化(羽化): 生まれたばかりの柔らかい印象の淡い黄緑。
@@ -1679,7 +1720,7 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
         "    p  一時停止/再開    [ / ]  速度変更    ,  設定画面    ?  ヘルプ    q  終了",
         "",
         "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
-        "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / D タコつぼ / P 水草",
+        "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / C 浄化剤 / D タコつぼ / P 水草",
         "          H 全員空腹に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
         "          J 水質トグル / X ランダム死亡 / Z スター投入 / L 寿命残り10秒(いずれもデバッグ)",
         "",

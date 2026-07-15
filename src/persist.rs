@@ -2,7 +2,7 @@
 // 魚(種類・成長段階・空腹度・座標・速度)、餌、経過時間を保存する。
 
 use crate::fish::Fish;
-use crate::sim::{Crab, Den, Egg, Food, Meat, Medicine, Plant, Rock, Seahorse, Shrimp, Simulation, Star};
+use crate::sim::{Crab, Den, Egg, Food, Meat, Medicine, Plant, Purifier, Rock, Seahorse, Shrimp, Simulation, Star};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -15,6 +15,9 @@ pub struct SavedState {
     // ピラニア専用の肉餌。旧セーブには存在しないため #[serde(default)] で空扱いにする。
     #[serde(default)]
     pub meat: Vec<Meat>,
+    // 浄化剤(沈下中の個体)。旧セーブには存在しないため #[serde(default)] で空扱いにする。
+    #[serde(default)]
+    pub purifiers: Vec<Purifier>,
     #[serde(default)]
     pub eggs: Vec<Egg>,
     // スター(無敵アイテム)。旧セーブには存在しないため #[serde(default)] で空扱いにする。
@@ -72,6 +75,9 @@ pub struct SavedState {
     // にfallbackする(#[serde(default)]でf64の標準デフォルト0.0がそのまま使える)。
     #[serde(default)]
     pub pollution: f64,
+    // 浄化剤の濃度。旧セーブにはキーが無いため、効果なし(0.0)にfallbackする。
+    #[serde(default)]
+    pub purifier_concentration: f64,
     // カニの表示ON/OFF。旧セーブにはキーが無いため、既定のtrue(表示)にfallbackする。
     #[serde(default = "default_true")]
     pub crab_toggle: bool,
@@ -127,6 +133,7 @@ pub fn save(sim: &Simulation, ctl: &crate::Ctl) -> std::io::Result<()> {
         food: sim.food.clone(),
         medicine: sim.medicine.clone(),
         meat: sim.meat.clone(),
+        purifiers: sim.purifiers.clone(),
         eggs: sim.eggs.clone(),
         stars: sim.stars.clone(),
         crabs: sim.crabs.clone(),
@@ -145,6 +152,7 @@ pub fn save(sim: &Simulation, ctl: &crate::Ctl) -> std::io::Result<()> {
         species_toggle: sim.species_toggle,
         feed_amount: sim.feed_amount,
         pollution: sim.pollution,
+        purifier_concentration: sim.purifier_concentration,
         crab_toggle: sim.crab_toggle,
         speed_idx: ctl.speed_idx,
     };
@@ -159,6 +167,7 @@ pub fn restore_into(sim: &mut Simulation, ctl: &mut crate::Ctl, state: SavedStat
     sim.food = state.food;
     sim.medicine = state.medicine;
     sim.meat = state.meat;
+    sim.purifiers = state.purifiers;
     sim.eggs = state.eggs;
     sim.stars = state.stars;
     sim.crabs = state.crabs;
@@ -171,6 +180,7 @@ pub fn restore_into(sim: &mut Simulation, ctl: &mut crate::Ctl, state: SavedStat
     sim.species_toggle = state.species_toggle;
     sim.feed_amount = state.feed_amount;
     sim.pollution = state.pollution;
+    sim.purifier_concentration = state.purifier_concentration;
     sim.crab_toggle = state.crab_toggle;
     ctl.sfx_on = state.sfx_on;
     ctl.overlay_on = state.overlay_on;
@@ -198,6 +208,7 @@ mod tests {
             food: Vec::new(),
             medicine: Vec::new(),
             meat: Vec::new(),
+            purifiers: Vec::new(),
             eggs: Vec::new(),
             stars: Vec::new(),
             crabs: Vec::new(),
@@ -221,6 +232,7 @@ mod tests {
             species_toggle: [true; 5],
             feed_amount: 1,
             pollution: 0.0,
+            purifier_concentration: 0.0,
             crab_toggle: true,
             speed_idx: 2,
         };
@@ -248,6 +260,11 @@ mod tests {
         assert!(restored.stars.is_empty(), "旧セーブにstarsが無くても空扱いで読めるはず");
         assert!(restored.shrimp.is_empty(), "旧セーブにshrimpが無くても空扱いで読めるはず");
         assert!(restored.seahorses.is_empty(), "旧セーブにseahorsesが無くても空扱いで読めるはず");
+        assert!(restored.purifiers.is_empty(), "旧セーブにpurifiersが無くても空扱いで読めるはず");
+        assert_eq!(
+            restored.purifier_concentration, 0.0,
+            "旧セーブではpurifier_concentrationは効果なし(0.0)にfallbackするはず"
+        );
         // 旧セーブに設定トグルのキーが無い場合、Ctl::new()と同じ既定値にfallbackするはず
         // (設定値を次回起動時に覚えておいてほしいという要望への対応で追加した
         // フィールド。旧セーブとの互換性を保つための回帰テスト)。
@@ -292,6 +309,7 @@ mod tests {
             food: Vec::new(),
             medicine: Vec::new(),
             meat: Vec::new(),
+            purifiers: Vec::new(),
             eggs: Vec::new(),
             stars: Vec::new(),
             crabs: Vec::new(),
@@ -310,6 +328,7 @@ mod tests {
             species_toggle: [true, false, true, false, true],
             feed_amount: 3,
             pollution: 42.5,
+            purifier_concentration: 0.0,
             crab_toggle: false,
             speed_idx: 4,
         };
@@ -338,6 +357,7 @@ mod tests {
             food: Vec::new(),
             medicine: Vec::new(),
             meat: Vec::new(),
+            purifiers: Vec::new(),
             eggs: Vec::new(),
             stars: Vec::new(),
             crabs: Vec::new(),
@@ -367,6 +387,7 @@ mod tests {
             species_toggle: [true; 5],
             feed_amount: 1,
             pollution: 0.0,
+            purifier_concentration: 0.0,
             crab_toggle: true,
             speed_idx: 2,
         };
@@ -388,6 +409,7 @@ mod tests {
             food: Vec::new(),
             medicine: Vec::new(),
             meat: Vec::new(),
+            purifiers: Vec::new(),
             eggs: Vec::new(),
             stars: Vec::new(),
             crabs: Vec::new(),
@@ -406,6 +428,7 @@ mod tests {
             species_toggle: [true; 5],
             feed_amount: 1,
             pollution: 0.0,
+            purifier_concentration: 0.0,
             crab_toggle: true,
             speed_idx: 2,
         };
@@ -426,6 +449,7 @@ mod tests {
             food: Vec::new(),
             medicine: Vec::new(),
             meat: Vec::new(),
+            purifiers: Vec::new(),
             eggs: Vec::new(),
             stars: vec![Star {
                 x: 15.0,
@@ -449,6 +473,7 @@ mod tests {
             species_toggle: [true; 5],
             feed_amount: 1,
             pollution: 0.0,
+            purifier_concentration: 0.0,
             crab_toggle: true,
             speed_idx: 2,
         };
@@ -457,5 +482,49 @@ mod tests {
         assert_eq!(restored.stars.len(), 1);
         assert_eq!(restored.stars[0].x, 15.0);
         assert_eq!(restored.stars[0].y, 8.0);
+    }
+
+    #[test]
+    fn purifiers_and_concentration_survive_a_serialize_round_trip() {
+        // 浄化剤(沈下中の個体)と浄化剤の濃度も保存対象であることの回帰テスト。
+        // 保存しないと、効果継続中や沈下途中の状態が再起動でリセットされてしまう。
+        let state = SavedState {
+            fish: Vec::new(),
+            food: Vec::new(),
+            medicine: Vec::new(),
+            meat: Vec::new(),
+            purifiers: vec![Purifier {
+                x: 18.0,
+                y: 3.0,
+                vy: 5.0,
+                sway_phase: 0.5,
+            }],
+            eggs: Vec::new(),
+            stars: Vec::new(),
+            crabs: Vec::new(),
+            shrimp: Vec::new(),
+            seahorses: Vec::new(),
+            plants: Vec::new(),
+            rocks: Vec::new(),
+            dens: Vec::new(),
+            elapsed: 7.0,
+            sfx_on: true,
+            overlay_on: true,
+            auto_on: false,
+            day_night_on: true,
+            auto_replenish_on: false,
+            bubble_sfx_on: true,
+            species_toggle: [true; 5],
+            feed_amount: 1,
+            pollution: 0.0,
+            purifier_concentration: 0.6,
+            crab_toggle: true,
+            speed_idx: 2,
+        };
+        let json = serde_json::to_string(&state).expect("シリアライズできるはず");
+        let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
+        assert_eq!(restored.purifiers.len(), 1);
+        assert_eq!(restored.purifiers[0].x, 18.0);
+        assert_eq!(restored.purifier_concentration, 0.6);
     }
 }
