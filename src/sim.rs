@@ -226,13 +226,13 @@ pub const ALGAE_HIDE_RADIUS: f64 = 14.0;
 pub const ALGAE_HIDE_MIX: f64 = 0.55; // 隠れ表現の強さ(背景色へどれだけ寄せるか)
 
 // --- タコの隠れる/出てくる状態遷移 ---
-// 低頻度でつぼから出てきて泳ぎ、しばらくしたら戻る。出ている時間が短く観察機会が
-// 少ないとの指摘を受けて、出ている時間を長めに(旧8〜20秒→20〜40秒)、隠れている
-// 時間を短めに(旧30〜90秒→15〜40秒)調整した。
-pub const OCTOPUS_HIDDEN_TIME_MIN: f64 = 15.0;
-pub const OCTOPUS_HIDDEN_TIME_MAX: f64 = 40.0;
-pub const OCTOPUS_EMERGE_TIME_MIN: f64 = 20.0;
-pub const OCTOPUS_EMERGE_TIME_MAX: f64 = 40.0;
+// 低頻度でつぼから出てきて泳ぎ、しばらくしたら戻る。追跡している様子を観察する機会を
+// もっと増やしたいとの指摘を受けて、出ている時間をさらに長めに(旧20〜40秒→30〜55秒)、
+// 隠れている時間をさらに短めに(旧15〜40秒→10〜25秒)調整した。
+pub const OCTOPUS_HIDDEN_TIME_MIN: f64 = 10.0;
+pub const OCTOPUS_HIDDEN_TIME_MAX: f64 = 25.0;
+pub const OCTOPUS_EMERGE_TIME_MIN: f64 = 30.0;
+pub const OCTOPUS_EMERGE_TIME_MAX: f64 = 55.0;
 // 出ている残り時間がこの値未満になったら、巣へ戻る引力をかけて泳いで戻る様子を見せる
 // (時間切れの瞬間に確実に隠れさせる処理自体は update_octopus() 側で保証している)。
 pub const OCTOPUS_RETURN_WINDOW: f64 = 4.0;
@@ -250,7 +250,9 @@ pub const OCTOPUS_LEG_WIGGLE_AMPLITUDE: f64 = 0.35; // 足の付け根1段あた
 // --- タコ自身の捕食(ピラニアと同様に低頻度・空腹時のみ・クールダウンあり) ---
 // ピラニアと同じ理由(GAIN=60が大きいため、閾値を高くしないと満腹状態が長時間続く)で99にする
 pub const OCTOPUS_HUNT_HUNGER_THRESHOLD: f64 = 99.0;
-pub const OCTOPUS_HUNT_RADIUS: f64 = 20.0;
+// 追跡している様子をもっと目立たせたいとの要望を受けて、検知範囲をピラニアと同じ
+// 広さに揃えた(旧20.0→PIRANHA_HUNT_RADIUSと同じ30.0)。
+pub const OCTOPUS_HUNT_RADIUS: f64 = 30.0;
 // 壁際で捕食できず振動するとの指摘を受けてピラニア側と同様に広げた(旧3.0→4.5)。
 // さらに口基準にした上で判定距離自体も広げるべきとの指摘を受けて再度拡大した
 // (旧4.5→7.0)。さらにタコの当たり判定もピラニアと同様にもっと広げてほしいという
@@ -260,12 +262,18 @@ pub const OCTOPUS_STRIKE_RADIUS: f64 = 10.0;
 pub const OCTOPUS_HUNT_COOLDOWN: f64 = 20.0;
 pub const OCTOPUS_PREDATION_HUNGER_GAIN: f64 = 60.0;
 // 追跡中も速さが体感できないとの指摘を受けてピラニア側と同様に強化(旧90.0)。
-// さらに基本移動速度を全体的に4倍にする方針を受けて4倍にした(旧140.0)。
-pub const OCTOPUS_HUNT_PULL: f64 = 560.0;
+// さらに基本移動速度を全体的に4倍にする方針を受けて4倍にした(旧140.0)。さらに追跡を
+// もっと目立たせたいとの要望を受けて、吸引の強さもピラニアと同じ値に揃えた
+// (旧560.0→PIRANHA_HUNT_PULLと同じ640.0)。
+pub const OCTOPUS_HUNT_PULL: f64 = 640.0;
 
 // --- 墨(タコがピラニアに追われると吐く) ---
 // タコの近くに捕食モードのピラニアがいたら、逃走(既存のfear_target経由)に加えて墨を吐く。
 pub const OCTOPUS_INK_TRIGGER_RADIUS: f64 = 26.0; // この距離以内に捕食モードのピラニアがいたら墨を吐く
+// 捕食モードのピラニアに限らず、種類を問わず魚がすぐ目の前まで近づいてきた場合にも
+// 墨を吐く。遠くの脅威に反応するピラニア用の半径より狭くし、「触れそうな距離まで
+// 寄られた」ときの反応として使う。
+pub const OCTOPUS_INK_NEARBY_FISH_RADIUS: f64 = 12.0;
 pub const INK_COOLDOWN: f64 = 20.0; // 連発防止のクールダウン
 // 墨のエフェクト: 血の滲みより広め・勢いよく拡散し、数秒(目安3〜5秒)残ってから薄れて消える。
 pub const INK_LIFETIME: f64 = 4.5;
@@ -2001,6 +2009,20 @@ impl Simulation {
                 )
             })
             .collect();
+        // 種類を問わず「すぐ近くまで寄ってきた魚」の位置スナップショット(墨のもう一つの
+        // トリガー判定に使う)。自分を含むタコ全種・死骸・隠れている魚・藻や岩に隠れている
+        // 魚は対象から除く。
+        let nearby_fish: Vec<(f64, f64)> = self
+            .fish
+            .iter()
+            .filter(|f| {
+                f.species != Species::Octopus
+                    && !f.dead
+                    && !f.hidden
+                    && !self.is_hidden_in_cover(f.x, f.y)
+            })
+            .map(|f| (f.x, f.y))
+            .collect();
 
         for f in &mut self.fish {
             if f.species != Species::Octopus || f.dead {
@@ -2031,14 +2053,18 @@ impl Simulation {
                 f.hidden_timer = self.rng.range(OCTOPUS_HIDDEN_TIME_MIN, OCTOPUS_HIDDEN_TIME_MAX);
             }
 
-            // 墨: 出ている間、近くに捕食モードのピラニアがいたら(追われているとみなし)吐く
+            // 墨: 出ている間、(1)近くに捕食モードのピラニアがいる(追われているとみなす)、
+            // または(2)種類を問わず魚がすぐ目の前まで寄ってきた、のいずれかで吐く。
             if !f.hidden && f.ink_cooldown <= 0.0 {
                 let threatened = piranhas.iter().any(|&(sx, sy, hunting)| {
                     hunting
                         && ((sx - f.x).powi(2) + (sy - f.y).powi(2)).sqrt()
                             < OCTOPUS_INK_TRIGGER_RADIUS
                 });
-                if threatened {
+                let fish_approached = nearby_fish.iter().any(|&(sx, sy)| {
+                    ((sx - f.x).powi(2) + (sy - f.y).powi(2)).sqrt() < OCTOPUS_INK_NEARBY_FISH_RADIUS
+                });
+                if threatened || fish_approached {
                     self.ink_clouds.push(InkCloud {
                         x: f.x,
                         y: f.y,
@@ -2080,7 +2106,23 @@ impl Simulation {
         // 死亡個体もそのまま含め、死亡フラグで群れ対象から除外する)
         // hunger/predation_cooldown も持たせて、他の魚が「近くのピラニアが今まさに
         // 捕食モードかどうか」を判定できるようにする(逃走ベクトルの判定に使う)。
-        let snap: Vec<(Species, f64, f64, f64, f64, bool, f64, f64, bool, u8, u8, bool, bool)> = self
+        let snap: Vec<(
+            Species,
+            f64,
+            f64,
+            f64,
+            f64,
+            bool,
+            f64,
+            f64,
+            bool,
+            u8,
+            u8,
+            bool,
+            bool,
+            Stage,
+            bool,
+        )> = self
             .fish
             .iter()
             .map(|f| {
@@ -2098,6 +2140,8 @@ impl Simulation {
                     f.kill_stage,
                     f.is_invincible(), // 無敵中の魚は誰からも捕食対象・追跡対象にしない
                     self.is_hidden_in_cover(f.x, f.y), // 藻・水草・岩に隠れている魚も同様
+                    f.stage,                           // タコの捕食対象制限(稚魚/成魚)に使う
+                    f.sick,                            // 同上(病気の成魚はタコの対象になる)
                 )
             })
             .collect();
@@ -2339,16 +2383,19 @@ impl Simulation {
                         _pvx,
                         _pvy,
                         pdead,
-                        _phunger,
+                        phunger,
                         _pcooldown,
                         phidden,
                         pgrowth,
                         pkill,
                         pinvincible,
                         pcover,
+                        pstage,
+                        psick,
                     ),
                 ) in snap.iter().enumerate()
                 {
+                    let p_hungry = phunger < HUNGRY_THRESHOLD;
                     if is_excluded_as_prey(
                         sp,
                         growth_stage_self,
@@ -2363,6 +2410,9 @@ impl Simulation {
                         pcover,
                         pgrowth,
                         pkill,
+                        pstage,
+                        psick,
+                        p_hungry,
                     ) {
                         continue;
                     }
@@ -2411,6 +2461,8 @@ impl Simulation {
                         _pkill,
                         _pinvincible,
                         _pcover,
+                        _pstage,
+                        _psick,
                     ),
                 ) in snap.iter().enumerate()
                 {
@@ -2476,6 +2528,8 @@ impl Simulation {
                     _okill,
                     _oinvincible,
                     _ocover,
+                    _ostage,
+                    _osick,
                 ),
             ) in snap.iter().enumerate()
             {
@@ -3387,7 +3441,21 @@ impl Simulation {
         // 位置・種・生死・隠れ状態(タコつぼ/藻・水草・岩)・墨の緊急脱出状態・成長段階・
         // 無敵状態のスナップショット(self.fish とインデックスを揃える。成長段階は
         // ピラニアの共食いのサイズ差判定に使う)
-        let snapshot: Vec<(Species, f64, f64, bool, bool, f64, u8, u8, bool, bool)> = self
+        let snapshot: Vec<(
+            Species,
+            f64,
+            f64,
+            bool,
+            bool,
+            f64,
+            u8,
+            u8,
+            bool,
+            bool,
+            f64,
+            Stage,
+            bool,
+        )> = self
             .fish
             .iter()
             .map(|f| {
@@ -3402,6 +3470,9 @@ impl Simulation {
                     f.kill_stage,
                     f.is_invincible(),
                     self.is_hidden_in_cover(f.x, f.y),
+                    f.hunger, // タコの捕食対象制限(空腹判定)に使う
+                    f.stage,  // 同上(稚魚/成魚)
+                    f.sick,   // 同上(病気の成魚はタコの対象になる)
                 )
             })
             .collect();
@@ -3447,9 +3518,24 @@ impl Simulation {
             let mut best_j = None;
             for (
                 j,
-                &(psp, px, py, pdead, phidden, p_ink_escape, p_growth, p_kill, p_invincible, p_cover),
+                &(
+                    psp,
+                    px,
+                    py,
+                    pdead,
+                    phidden,
+                    p_ink_escape,
+                    p_growth,
+                    p_kill,
+                    p_invincible,
+                    p_cover,
+                    phunger,
+                    pstage,
+                    psick,
+                ),
             ) in snapshot.iter().enumerate()
             {
+                let p_hungry = phunger < HUNGRY_THRESHOLD;
                 if is_excluded_as_prey(
                     f.species,
                     f.growth_stage,
@@ -3464,6 +3550,9 @@ impl Simulation {
                     p_cover,
                     p_growth,
                     p_kill,
+                    pstage,
+                    psick,
+                    p_hungry,
                 ) {
                     continue;
                 }
@@ -3525,18 +3614,30 @@ impl Simulation {
                     self.fish[si].piranha_meals_since_full = 0;
                 }
             }
-            // タコが捕食されて死んだ場合、CORPSE_REMOVE_TIME経過やカニによる片付けを
-            // 待たずにこの場で個体が消えるため、対応するタコつぼもここで一緒に
-            // 片付ける(update_biology・update_crabs側の同種の後始末とは別経路なので、
-            // ここでも必要)。
-            let vanished_octopus_den = if prey_species == Species::Octopus {
-                Some((self.fish[pi].den_x, self.fish[pi].den_y))
+            if predator_species == Species::Piranha {
+                // ピラニアの捕食は即消滅させず、出血して力尽きた死骸として残す
+                // (浮上→沈降→カニの片付け、または24時間で自動消滅する通常の死骸
+                // パイプラインに乗せる。`t`キーでつついて沈降を早める既存の仕組みも
+                // そのまま効く)。獲物がタコだった場合のタコつぼの後始末は、死因を
+                // 問わず死んだタコを処理する既存の汎用経路(update_biologyの
+                // CORPSE_REMOVE_TIME経過時・update_crabsのカニ片付け時)に任せる。
+                self.fish[pi].dead = true;
+                self.fish[pi].dead_timer = 0.0;
             } else {
-                None
-            };
-            self.fish.remove(pi);
-            if let Some((dx, dy)) = vanished_octopus_den {
-                self.dens.retain(|d| !(d.x == dx && d.y == dy));
+                // タコ・無敵の一時的捕食者による捕食は従来どおり即消滅させる。
+                // タコが捕食されて消える場合、CORPSE_REMOVE_TIME経過やカニによる片付けを
+                // 待たずにこの場で個体が消えるため、対応するタコつぼもここで一緒に
+                // 片付ける(update_biology・update_crabs側の同種の後始末とは別経路なので、
+                // ここでも必要)。
+                let vanished_octopus_den = if prey_species == Species::Octopus {
+                    Some((self.fish[pi].den_x, self.fish[pi].den_y))
+                } else {
+                    None
+                };
+                self.fish.remove(pi);
+                if let Some((dx, dy)) = vanished_octopus_den {
+                    self.dens.retain(|d| !(d.x == dx && d.y == dy));
+                }
             }
 
             // 血飛沫: 複数の粒子を捕食位置の周囲に散らし、寿命をわずかにばらつかせることで
@@ -3563,10 +3664,21 @@ impl Simulation {
             });
             self.sound_events.push(SfxEvent::Predation);
             // 捕食は血肉が水中に一気に飛び散るイベントのため、堆積物や病気個体の
-            // じわじわした悪化とは別に、その場で水質を大きく悪化させる(捕食された
-            // 個体は即座に消えるため、死骸放置による継続的な悪化は発生しない)。
+            // じわじわした悪化とは別に、その場で水質を大きく悪化させる。タコ・無敵の
+            // 一時的捕食者による捕食は獲物が即座に消えるためこのスパイクのみだが、
+            // ピラニアの捕食は獲物が死骸として残るため、このスパイクに加えて
+            // 死骸放置ぶんの悪化(POLLUTION_PER_DEAD_FISH)も別途乗る。
             self.pollution = (self.pollution + POLLUTION_PREDATION_SPIKE).min(POLLUTION_MAX);
-            self.set_message(format!("{}が食べられた…", species_name(prey_species)));
+            if predator_species == Species::Piranha {
+                // ピラニアの捕食は即消滅ではなく出血死のため、消えたのではなく力尽きた
+                // という表現にする(他の死因で使っている「力尽きた」と同じ言い回し)。
+                self.set_message(format!(
+                    "{}がピラニアに襲われ力尽きた…",
+                    species_name(prey_species)
+                ));
+            } else {
+                self.set_message(format!("{}が食べられた…", species_name(prey_species)));
+            }
         }
     }
 
@@ -3792,6 +3904,9 @@ fn is_excluded_as_prey(
     candidate_hidden_in_cover: bool,
     candidate_growth_stage: u8,
     candidate_kill_stage: u8,
+    candidate_stage: Stage,
+    candidate_sick: bool,
+    candidate_hungry: bool,
 ) -> bool {
     if self_index == candidate_index || candidate_dead {
         return true;
@@ -3819,6 +3934,13 @@ fn is_excluded_as_prey(
     }
     if predator_species == Species::Octopus && candidate_species == Species::Piranha {
         return true; // タコはピラニアを襲わない
+    }
+    if predator_species == Species::Octopus
+        && candidate_stage == Stage::Adult
+        && !candidate_sick
+        && !candidate_hungry
+    {
+        return true; // タコは健康(病気でなく)かつ満腹(空腹でない)な成魚を襲わない(稚魚は常時対象)
     }
     if candidate_species == predator_species {
         if predator_species == Species::Piranha {
@@ -3905,8 +4027,8 @@ mod tests {
         for _ in 0..24 {
             sim.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0; // 捕食条件を維持
             sim.update(0.05, 80, 40);
-            if sim.fish.len() < 2 {
-                break; // 追いついて捕食してしまったら十分な証拠なのでそこで終了
+            if sim.fish[1].dead {
+                break; // 追いついて捕食し獲物が死骸になったら十分な証拠なので終了
             }
         }
         let moved = sim.fish[0].x - start_x;
@@ -3939,7 +4061,9 @@ mod tests {
             // 十分な猶予(実機で確認済みの時間より長め)を確保する。
             sim.fish[1].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0; // ピラニアの捕食モードを維持
             sim.update(0.1, w, h);
-            if sim.fish.len() < 2 {
+            // ピラニアの捕食は即消滅させず死骸を残すため、「捕食が成立した」=
+            // 追い詰めた魚(index 0)が死亡状態になった、で判定する。
+            if sim.fish[0].dead {
                 caught = true;
                 break;
             }
@@ -3983,11 +4107,13 @@ mod tests {
         for _ in 0..80 {
             sim2.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0; // ピラニアの捕食モードを維持
             sim2.update(0.05, 80, 40);
-            if sim2.fish.len() < 2 {
+            // 捕食は即消滅させず死骸を残すため、捕まったかどうかは獲物の死亡フラグで見る。
+            if sim2.fish[1].dead {
                 break;
             }
         }
-        if sim2.fish.len() == 2 {
+        // 逃げ切れた(まだ生きている)場合のみ、距離が広がったことを検証する。
+        if !sim2.fish[1].dead {
             let final_dist = ((sim2.fish[1].x - sim2.fish[0].x).powi(2)
                 + (sim2.fish[1].y - sim2.fish[0].y).powi(2))
             .sqrt();
@@ -5546,13 +5672,18 @@ mod tests {
         for _ in 0..30 {
             sim.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
             sim.update(0.1, 80, 40);
-            if sim.fish.len() < 2 {
+            // ピラニアの捕食は即消滅させず出血した死骸として残すようになったため、
+            // 「捕食が成立した」= 獲物が死亡フラグ状態になった、で打ち切る。
+            if sim.fish[1].dead {
                 break;
             }
         }
 
-        assert_eq!(sim.fish.len(), 1, "捕食された魚はその場で消えるはず");
-        assert_eq!(sim.fish[0].species, Species::Piranha, "残るのはピラニアのはず");
+        // ピラニアに襲われた獲物は即消滅せず、死骸として水槽に残るはず。
+        assert_eq!(sim.fish.len(), 2, "ピラニアの捕食では獲物は即消滅せず死骸として残るはず");
+        assert!(sim.fish[1].dead, "襲われた獲物は死亡状態になるはず");
+        assert_eq!(sim.fish[0].species, Species::Piranha, "ピラニアは生きて残るはず");
+        assert!(!sim.fish[0].dead, "捕食したピラニア自身は死なないはず");
         assert!(sim.fish[0].hunger > PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0, "捕食で空腹度が回復するはず");
         assert_eq!(sim.fish[0].predation_cooldown, PIRANHA_HUNT_COOLDOWN, "捕食後はクールダウンに入るはず");
         assert!(
@@ -5568,14 +5699,80 @@ mod tests {
         );
         assert!(sim.drop_effects.iter().all(|e| e.kind == EffectKind::Blood));
         assert!(
-            sim.message.as_deref().unwrap_or("").contains("食べられた"),
-            "捕食メッセージが表示されるはず"
+            sim.message.as_deref().unwrap_or("").contains("力尽きた"),
+            "ピラニアの捕食メッセージが表示されるはず"
         );
         assert_eq!(sim.fish[0].kill_stage, 1, "捕食するたびにkill_stageが増えるはず");
         // 血の滲み(範囲エフェクト)も捕食位置に1つ出るはず
         assert_eq!(sim.blood_stains.len(), 1, "捕食で血の滲みが1つ出るはず");
         // このtick内で生成後すぐにdt(0.1)分減衰するため、ほぼ満タンのはず
         assert!(sim.blood_stains[0].life > BLOOD_STAIN_LIFETIME - 0.2);
+    }
+
+    #[test]
+    fn piranha_kill_leaves_a_floating_corpse_instead_of_vanishing() {
+        // ピラニアの捕食は即消滅ではなく、出血して力尽きた死骸として水槽に残り、
+        // 通常の死骸パイプライン(浮上→沈降→片付け)に乗るはずの回帰テスト。
+        let mut sim = Simulation::new(Rng::new(100));
+        let mut piranha = Fish::new(Species::Piranha, Stage::Adult, 40.0, 20.0);
+        piranha.hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+        sim.fish.push(piranha);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, 45.0, 20.0));
+
+        for _ in 0..30 {
+            sim.fish[0].hunger = PIRANHA_HUNT_HUNGER_THRESHOLD - 10.0;
+            sim.update(0.1, 80, 40);
+            if sim.fish[1].dead {
+                break;
+            }
+        }
+
+        // 獲物は消えず、死骸として残っている。
+        assert_eq!(sim.fish.len(), 2, "ピラニアの捕食では獲物は消えず死骸として残るはず");
+        assert!(sim.fish[1].dead, "襲われた獲物は死亡状態になるはず");
+        // 血の演出は消滅する場合と同様に出ているはず。
+        assert!(!sim.blood_stains.is_empty(), "捕食で血の滲みが出るはず");
+        assert!(
+            sim.drop_effects.iter().any(|e| e.kind == EffectKind::Blood),
+            "捕食で血飛沫パーティクルが出るはず"
+        );
+        assert!(
+            sim.sound_events.contains(&SfxEvent::Predation),
+            "捕食で Predation イベントが発生するはず"
+        );
+
+        // 死亡してからの経過時間が計測され始め、さらにtickを進めると増えていくはず。
+        let before = sim.fish[1].dead_timer;
+        sim.update(0.1, 80, 40);
+        assert!(
+            sim.fish[1].dead_timer > before,
+            "死骸の経過時間(dead_timer)が進んでいくはず: before={before}, after={}",
+            sim.fish[1].dead_timer
+        );
+    }
+
+    #[test]
+    fn octopus_kill_still_removes_prey_instantly() {
+        // 対になる回帰テスト: タコの捕食はこれまでどおり獲物を即消滅させ、死骸を
+        // 残さないこと(ピラニアの出血死骸化は分岐しており、タコには波及しない)。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(605));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        octo.hunger = OCTOPUS_HUNT_HUNGER_THRESHOLD - 10.0;
+        let (mx, my) = octo.mouth_position();
+        sim.fish.push(octo);
+        // 常に捕食対象になる稚魚を口の位置に置く。
+        sim.fish.push(Fish::new(Species::Neon, Stage::Fry, mx, my));
+
+        sim.update(0.1, w, h);
+
+        assert_eq!(sim.fish.len(), 1, "タコの捕食では獲物は即消滅し死骸を残さないはず");
+        assert_eq!(sim.fish[0].species, Species::Octopus);
+        assert!(!sim.fish[0].dead, "タコ自身は生きて残るはず");
     }
 
     #[test]
@@ -5600,17 +5797,34 @@ mod tests {
         for _ in 0..300 {
             sim.fish[0].predation_cooldown = 0.0; // クールダウン明けを即座に再現する
             sim.update(0.1, 80, 40);
-            if sim.fish.len() <= 2 {
+            // ピラニアの捕食は即消滅させず死骸を残すようになったため、「3匹狩り終えた」=
+            // 死骸が3つできた、で打ち切る(以降はhungerの自然減少で4匹目まで狩ってしまう
+            // 前に止め、旧テストが len<=2 で早期打ち切りしていたのと同じ意図を保つ)。
+            if sim.fish.iter().filter(|f| f.dead).count() >= 3 {
                 break;
             }
         }
 
         assert_eq!(
             sim.fish.len(),
-            2,
-            "3匹食べたところで4匹目は残るはず(ピラニア+餌1匹)"
+            5,
+            "ピラニア+4匹(うち3匹は死骸)が残るはず"
+        );
+        assert_eq!(
+            sim.fish.iter().filter(|f| f.dead).count(),
+            3,
+            "3匹だけが捕食されて死骸になるはず"
+        );
+        assert_eq!(
+            sim.fish
+                .iter()
+                .filter(|f| !f.dead && f.species == Species::Neon)
+                .count(),
+            1,
+            "3匹食べたところで4匹目は襲われず生き残るはず"
         );
         assert_eq!(sim.fish[0].species, Species::Piranha);
+        assert!(!sim.fish[0].dead, "ピラニア自身は生きているはず");
         assert_eq!(
             sim.fish[0].piranha_meals_since_full, 0,
             "3匹目を食べたタイミングでカウンタはリセットされるはず"
@@ -5794,14 +6008,20 @@ mod tests {
 
         for _ in 0..50 {
             sim.update(0.1, w, h);
-            if sim.fish.len() < 2 {
+            if sim.fish[1].dead {
                 break;
             }
         }
 
+        // ピラニアの捕食は即消滅させず死骸を残すため、獲物(index 1)が死亡状態に
+        // なったことで「捕食が成立した」ことを確認する。
         assert_eq!(
             sim.fish.len(),
-            1,
+            2,
+            "捕食後も獲物は死骸として残るはず"
+        );
+        assert!(
+            sim.fish[1].dead,
             "拡大した大きいピラニアでも壁際の獲物を確実に捕食できるはず"
         );
     }
@@ -6011,15 +6231,22 @@ mod tests {
 
         sim.update(0.1, 80, 40);
 
+        // ピラニアの捕食(共食い含む)は即消滅させず死骸を残すため、小さい方(index 1)が
+        // 死亡状態になり、大きい方(index 0)が生きて残ることを確認する。
         assert_eq!(
             sim.fish.len(),
-            1,
+            2,
+            "共食い後も獲物は死骸として残るはず"
+        );
+        assert!(
+            sim.fish[1].dead,
             "十分サイズ差のある大きいピラニアは、小さいピラニアを捕食してよいはず"
         );
         assert_eq!(sim.fish[0].species, Species::Piranha);
+        assert!(!sim.fish[0].dead, "大きい方のピラニアは生きて残るはず");
         assert_eq!(
             sim.fish[0].growth_stage, GENERAL_MAX_GROWTH_STAGE,
-            "残るのは大きい方のピラニアのはず"
+            "生き残るのは大きい方のピラニアのはず"
         );
         assert!(
             sim.sound_events.contains(&SfxEvent::Predation),
@@ -8106,7 +8333,7 @@ mod tests {
 
         let mut saw_emerged = false;
         for _ in 0..1000 {
-            // 1000 * 0.1 = 100秒。OCTOPUS_HIDDEN_TIME_MAX(40秒)より十分長い。
+            // 1000 * 0.1 = 100秒。OCTOPUS_HIDDEN_TIME_MAX(25秒)より十分長い。
             sim.update(0.1, w, h);
             if !sim.fish[0].hidden {
                 saw_emerged = true;
@@ -8115,9 +8342,9 @@ mod tests {
         }
         assert!(saw_emerged, "十分な時間が経てば一度はつぼから出てくるはず");
 
-        // さらに時間を進めれば、出ている時間(最大40秒)を超えて必ず巣へ戻るはず
-        for _ in 0..700 {
-            // 700 * 0.1 = 70秒。OCTOPUS_EMERGE_TIME_MAX(40秒)より十分長い。
+        // さらに時間を進めれば、出ている時間(最大55秒)を超えて必ず巣へ戻るはず
+        for _ in 0..800 {
+            // 800 * 0.1 = 80秒。OCTOPUS_EMERGE_TIME_MAX(55秒)より十分長い。
             sim.update(0.1, w, h);
             if sim.fish[0].hidden {
                 break;
@@ -8175,8 +8402,13 @@ mod tests {
 
         sim.update(0.1, w, h);
 
-        assert_eq!(sim.fish_count(), 1, "出ているタコはピラニアに捕食されてよいはず");
-        assert_eq!(sim.fish[0].species, Species::Piranha);
+        // ピラニアの捕食は即消滅させず死骸を残すため、出ているタコ(index 0)が
+        // 死亡状態になったことで「ピラニアの捕食対象になれる」ことを確認する。
+        assert_eq!(sim.fish.len(), 2, "捕食後もタコは死骸として残るはず");
+        assert_eq!(sim.fish[0].species, Species::Octopus);
+        assert!(sim.fish[0].dead, "出ているタコはピラニアに捕食されてよいはず");
+        assert_eq!(sim.fish[1].species, Species::Piranha);
+        assert!(!sim.fish[1].dead, "ピラニアは生きて残るはず");
     }
 
     #[test]
@@ -8407,9 +8639,12 @@ mod tests {
 
         sim.update(0.1, w, h);
 
-        assert_eq!(sim.fish_count(), 1, "カメオが居ても通常の捕食は普段どおり成立するはず");
+        // ピラニアの捕食は即消滅させず死骸を残すため、獲物(index 0)が死亡状態に
+        // なったことで「カメオが居ても通常の捕食は普段どおり成立する」ことを確認する。
+        assert_eq!(sim.fish.len(), 2, "捕食後も獲物は死骸として残るはず");
+        assert!(sim.fish[0].dead, "カメオが居ても通常の捕食は普段どおり成立するはず");
         assert!(
-            sim.fish.iter().all(|f| f.species == Species::Piranha),
+            sim.fish.iter().all(|f| f.species == Species::Neon || f.species == Species::Piranha),
             "カメオ自体はfishリストに紛れ込まないはず"
         );
         assert_eq!(sim.cameos.len(), 1, "カメオ自身は捕食されて消えたりしないはず");
@@ -8454,6 +8689,9 @@ mod tests {
                 false, // 藻・岩に隠れているわけではない
                 0,
                 0,
+                Stage::Adult, // 健康・満腹の成魚(タコの成魚制限には引っかからない条件)
+                false,
+                false,
             ),
             "無敵中の魚は誰からも捕食対象にならないはず"
         );
@@ -8747,7 +8985,10 @@ mod tests {
 
         sim.update(0.1, w, h);
 
-        assert_eq!(sim.fish_count(), 1, "隠れ場所が無ければ通常どおり捕食されるはず");
+        // ピラニアの捕食は即消滅させず死骸を残すため、獲物(index 0)が死亡状態に
+        // なったことで「隠れ場所が無ければ通常どおり捕食される」ことを確認する。
+        assert_eq!(sim.fish.len(), 2, "捕食後も獲物は死骸として残るはず");
+        assert!(sim.fish[0].dead, "隠れ場所が無ければ通常どおり捕食されるはず");
     }
 
     #[test]
@@ -8791,16 +9032,168 @@ mod tests {
         // 当たり判定を胴体でなく口にすべきという指摘への対応: 口の位置に配置する
         let (mx, my) = octo.mouth_position();
         sim.fish.push(octo);
-        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, mx, my));
+        // タコは健康・満腹な成魚を襲わない仕様のため、常に捕食対象になる稚魚を獲物にする。
+        sim.fish.push(Fish::new(Species::Neon, Stage::Fry, mx, my));
 
         sim.update(0.1, w, h);
 
-        assert_eq!(sim.fish_count(), 1, "空腹で出ているタコは近くの魚を捕食できるはず");
+        assert_eq!(sim.fish_count(), 1, "空腹で出ているタコは近くの稚魚を捕食できるはず");
         assert_eq!(sim.fish[0].species, Species::Octopus);
         assert!(
             sim.fish[0].hunger > OCTOPUS_HUNT_HUNGER_THRESHOLD - 10.0,
             "捕食で空腹度が回復するはず"
         );
+    }
+
+    // タコの捕食対象制限(稚魚は常時・成魚は病気か空腹の時のみ)の判定ロジックを
+    // 直接呼んで検証する。ピラニア捕食側は無敵バイパスより後・同種判定より前に
+    // 挿入した新ゲートの影響を受けないことも合わせて確認する。
+    fn octopus_excludes(
+        candidate_stage: Stage,
+        candidate_sick: bool,
+        candidate_hungry: bool,
+    ) -> bool {
+        is_excluded_as_prey(
+            Species::Octopus,
+            0,
+            0,
+            false, // タコは無敵ではない(通常の捕食者としての判定)
+            0,
+            1,
+            Species::Neon,
+            false,
+            false,
+            false,
+            false,
+            0,
+            0,
+            candidate_stage,
+            candidate_sick,
+            candidate_hungry,
+        )
+    }
+
+    #[test]
+    fn octopus_always_targets_fry_regardless_of_condition() {
+        // 稚魚は健康・満腹でも、病気・空腹でも常にタコの捕食対象になる。
+        assert!(
+            !octopus_excludes(Stage::Fry, false, false),
+            "健康・満腹の稚魚もタコの捕食対象になるはず"
+        );
+        assert!(
+            !octopus_excludes(Stage::Fry, true, true),
+            "病気・空腹の稚魚もタコの捕食対象になるはず"
+        );
+    }
+
+    #[test]
+    fn octopus_does_not_target_a_healthy_well_fed_adult() {
+        // 健康(病気でない)かつ満腹(空腹でない)な成魚はタコの捕食対象から外れる。
+        assert!(
+            octopus_excludes(Stage::Adult, false, false),
+            "健康・満腹の成魚はタコの捕食対象から除外されるはず"
+        );
+    }
+
+    #[test]
+    fn octopus_targets_a_sick_or_hungry_adult() {
+        // 病気の成魚、または空腹の成魚はタコの捕食対象になる。
+        assert!(
+            !octopus_excludes(Stage::Adult, true, false),
+            "病気の成魚はタコの捕食対象になるはず"
+        );
+        assert!(
+            !octopus_excludes(Stage::Adult, false, true),
+            "空腹の成魚はタコの捕食対象になるはず"
+        );
+    }
+
+    #[test]
+    fn piranha_still_targets_a_healthy_well_fed_adult() {
+        // 新しい制限はタコ(Species::Octopus)限定のため、ピラニアは健康・満腹な成魚を
+        // これまでどおり捕食対象にできる(影響を受けない)。
+        assert!(
+            !is_excluded_as_prey(
+                Species::Piranha,
+                0,
+                0,
+                false,
+                0,
+                1,
+                Species::Neon,
+                false,
+                false,
+                false,
+                false,
+                0,
+                0,
+                Stage::Adult,
+                false,
+                false,
+            ),
+            "ピラニアは健康・満腹の成魚をこれまでどおり襲えるはず"
+        );
+    }
+
+    #[test]
+    fn hungry_octopus_leaves_a_healthy_well_fed_adult_alone() {
+        // 統合テスト: 空腹で出ているタコの目の前に健康・満腹な成魚がいても、
+        // 一定時間ずっと捕食しないはず(新しい捕食対象制限)。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(620));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        let (mx, my) = octo.mouth_position();
+        sim.fish.push(octo);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, mx, my));
+
+        for _ in 0..100 {
+            sim.fish[0].hunger = OCTOPUS_HUNT_HUNGER_THRESHOLD - 10.0; // タコは空腹を維持
+            sim.fish[0].predation_cooldown = 0.0;
+            sim.fish[1].hunger = MAX_HUNGER; // 獲物は満腹(健康)を維持
+            sim.fish[1].sick = false;
+            sim.update(0.1, w, h);
+        }
+
+        assert_eq!(sim.fish.len(), 2, "健康・満腹の成魚は襲われないはず");
+        assert!(!sim.fish[1].dead, "健康・満腹の成魚は生きたままのはず");
+    }
+
+    #[test]
+    fn hungry_octopus_eventually_preys_on_a_hungry_adult() {
+        // 対になる統合テスト: 空腹な成魚は同じ状況でタコに捕食される(条件が満たされれば
+        // 通常どおり捕食が成立する)。
+        let (w, h) = (80, 40);
+        let mut sim = Simulation::new(Rng::new(621));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        let (mx, my) = octo.mouth_position();
+        sim.fish.push(octo);
+        sim.fish.push(Fish::new(Species::Neon, Stage::Adult, mx, my));
+
+        let mut eaten = false;
+        for _ in 0..200 {
+            sim.fish[0].hunger = OCTOPUS_HUNT_HUNGER_THRESHOLD - 10.0; // タコは空腹を維持
+            sim.fish[0].predation_cooldown = 0.0;
+            if sim.fish.len() > 1 {
+                sim.fish[1].hunger = HUNGRY_THRESHOLD - 1.0; // 獲物は空腹を維持(捕食対象)
+            }
+            sim.update(0.1, w, h);
+            if sim.fish.len() < 2 {
+                eaten = true;
+                break;
+            }
+        }
+
+        assert!(eaten, "空腹の成魚はタコに捕食されるはず");
+        assert_eq!(sim.fish.len(), 1, "捕食されたらタコだけが残る(タコは即消滅させる)はず");
+        assert_eq!(sim.fish[0].species, Species::Octopus);
     }
 
     #[test]
@@ -8823,6 +9216,75 @@ mod tests {
         assert!(!sim.ink_clouds.is_empty(), "ピラニアに追われたタコは墨を吐くはず");
         assert!(sim.sound_events.contains(&SfxEvent::Ink));
         assert!(sim.fish[0].ink_cooldown > 0.0, "墨を吐いた後はクールダウンに入るはず");
+    }
+
+    #[test]
+    fn octopus_inks_when_any_fish_swims_right_up_to_it() {
+        // ピラニアが1匹も居なくても、種類を問わず魚がすぐ目の前
+        // (OCTOPUS_INK_NEARBY_FISH_RADIUS以内)まで寄ってきたら墨を吐くはず。
+        let mut sim = Simulation::new(Rng::new(630));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        sim.fish.push(octo);
+        // 捕食者ではない普通の魚を、新しい近接半径の内側に置く。
+        sim.fish.push(Fish::new(
+            Species::Goldfish,
+            Stage::Adult,
+            40.0 + OCTOPUS_INK_NEARBY_FISH_RADIUS * 0.5,
+            20.0,
+        ));
+
+        sim.update_octopus(0.1);
+
+        assert!(
+            !sim.ink_clouds.is_empty(),
+            "目の前まで寄ってきた魚に対しても墨を吐くはず"
+        );
+        assert!(sim.sound_events.contains(&SfxEvent::Ink));
+        let octo_idx = sim
+            .fish
+            .iter()
+            .position(|f| f.species == Species::Octopus)
+            .expect("タコが居るはず");
+        assert!(
+            sim.fish[octo_idx].ink_escape_timer > 0.0,
+            "この新トリガーでも緊急脱出タイマー(逃走ダッシュ)が立つはず"
+        );
+    }
+
+    #[test]
+    fn octopus_does_not_ink_for_a_fish_outside_the_nearby_radius() {
+        // 新しい近接半径より遠い(ただし旧ピラニア用トリガー半径よりは近い)位置に
+        // 普通の魚が居るだけでは墨を吐かないこと。新半径が実際に使われており、
+        // 旧半径に素通りしていないことを確認する。
+        let mid = (OCTOPUS_INK_NEARBY_FISH_RADIUS + OCTOPUS_INK_TRIGGER_RADIUS) / 2.0;
+        assert!(
+            mid > OCTOPUS_INK_NEARBY_FISH_RADIUS && mid < OCTOPUS_INK_TRIGGER_RADIUS,
+            "テスト前提: 新半径より遠く旧半径より近い距離であること"
+        );
+        let mut sim = Simulation::new(Rng::new(631));
+        let mut octo = Fish::new(Species::Octopus, Stage::Adult, 40.0, 20.0);
+        octo.hidden = false;
+        octo.hidden_timer = 999.0;
+        octo.den_x = 40.0;
+        octo.den_y = 20.0;
+        sim.fish.push(octo);
+        sim.fish.push(Fish::new(
+            Species::Goldfish,
+            Stage::Adult,
+            40.0 + mid,
+            20.0,
+        ));
+
+        sim.update_octopus(0.1);
+
+        assert!(
+            sim.ink_clouds.is_empty(),
+            "新半径より遠い普通の魚に対しては墨を吐かないはず"
+        );
     }
 
     #[test]
@@ -9124,6 +9586,9 @@ mod tests {
                 false,
                 0,
                 0,
+                Stage::Adult,
+                false,
+                false,
             ),
             "通常の捕食者からもクジラは捕食対象にならないはず"
         );
@@ -9143,6 +9608,9 @@ mod tests {
                 false,
                 0,
                 0,
+                Stage::Adult,
+                false,
+                false,
             ),
             "無敵の一時的捕食者からもクジラは捕食対象にならないはず"
         );

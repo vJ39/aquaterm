@@ -307,7 +307,7 @@ impl Fish {
 
     // 描画用スプライト(種類×成長段階)
     pub fn sprite(&self) -> Sprite {
-        Sprite::for_fish(self.species, self.stage)
+        Sprite::for_fish(self.species, self.stage, self.growth_stage)
     }
 
     // 空腹度の段階
@@ -425,6 +425,10 @@ impl Fish {
     }
 }
 
+// この成長段階(growth_stage)以降のエンゼルフィッシュ成魚は、低解像度の
+// 拡大ではなく専用の高解像度パターンに切り替える(fish.rs内でのみ使う定数)。
+const ANGELFISH_BIG_ADULT_GROWTH_STAGE: u8 = 2;
+
 // ドットマトリクスのスプライト。原点は左上、facing で左右反転する。
 pub struct Sprite {
     pub width: usize,
@@ -433,7 +437,7 @@ pub struct Sprite {
 }
 
 impl Sprite {
-    fn for_fish(species: Species, stage: Stage) -> Sprite {
+    fn for_fish(species: Species, stage: Stage, growth_stage: u8) -> Sprite {
         // 病気のまだら模様など、魚の構造がはっきり分かるくらい大きくしてほしい
         // (1.5〜2倍程度では不十分)という要望を受けて、既存4種は大幅に拡大・
         // 精細化して描き直した(ヒレ('F')・眼('E')・体の帯('A')が見て取れる解像度)。
@@ -478,11 +482,14 @@ impl Sprite {
             // 描き直した。旧パターンは尾が体と同色('<')で見た目に溶け込んでおり、
             // 蝶ネクタイのような輪郭になっていた。グッピーらしい大きく広がる
             // 扇状の尾びれ(F)を左側にはっきり配置し、体は小さく丸くまとめた。
+            // 体側のライン(A)がほぼ2ドットしかなく見えづらいとの指摘を受けて、
+            // 体高がある行の幅いっぱいに伸ばし、体側を横切るはっきりした
+            // 一本のラインとして見えるようにした。
             (Species::Guppy, Stage::Adult) => &[
                 "...FF.......",
                 "..FBBBF.....",
                 ".FBBBBBF....",
-                "FFBBAABBBB.E",
+                "FFBAAAAAAB.E",
                 ".FBBBBBF....",
                 "..FBBBF.....",
                 "...FF.......",
@@ -530,18 +537,56 @@ impl Sprite {
             // 見えていた。体幹をしっかり幅を持たせた菱形にし、背びれ・尻びれ(F)を
             // その上下から連続的に長く伸ばすことで、エンゼルフィッシュらしい
             // 「体高があり、上下に長いヒレを引いた」シルエットにした。
+            // 縦縞模様(A)がほぼ2ドットしかなく見えづらいとの指摘を受けて、
+            // 体の縦方向に3本の縦縞が通るよう(A)を各行へ配置し直した(体高が
+            // 狭い頭側・尾側の行では縞の本数が自然に減り、中心付近の広い行で
+            // 3本とも見える)。
+            // 成長段階が上がって大きく表示されるほど、この低解像度の模様を
+            // 拡大するだけでは間延びしてエンゼルフィッシュらしく見えなくなる
+            // との指摘への対応。一定の成長段階(ANGELFISH_BIG_ADULT_GROWTH_STAGE)
+            // 以降は、同じ縦縞の構図を縦横2倍の解像度で描き直した専用パターンに
+            // 切り替える(単純な引き伸ばしではなく、縞・ヒレの各要素自体を
+            // 2倍の太さ・段数で描くことで拡大後も模様が潰れないようにする)。
+            (Species::Angelfish, Stage::Adult) if growth_stage >= ANGELFISH_BIG_ADULT_GROWTH_STAGE => &[
+                "............FFFF............",
+                "............FFFF............",
+                "..........FFFFFFFF..........",
+                "..........FFFFFFFF..........",
+                "........FFFFBBAAFFFF........",
+                "........FFFFBBAAFFFF........",
+                "......FF..AABBAABB..FF......",
+                "......FF..AABBAABB..FF......",
+                "........BBAABBAABBAA........",
+                "........BBAABBAABBAA........",
+                "......BBBBAABBAABBAABB......",
+                "......BBBBAABBAABBAABB......",
+                "<<....BBBBAABBAABBAABB....EE",
+                "<<....BBBBAABBAABBAABB....EE",
+                "......BBBBAABBAABBAABB......",
+                "......BBBBAABBAABBAABB......",
+                "........BBAABBAABBAA........",
+                "........BBAABBAABBAA........",
+                "......FF..AABBAABB..FF......",
+                "......FF..AABBAABB..FF......",
+                "........FFFFBBAAFFFF........",
+                "........FFFFBBAAFFFF........",
+                "..........FFFFFFFF..........",
+                "..........FFFFFFFF..........",
+                "............FFFF............",
+                "............FFFF............",
+            ],
             (Species::Angelfish, Stage::Adult) => &[
                 "......FF......",
                 ".....FFFF.....",
-                "....FFBBFF....",
-                "...F.BBBB.F...",
-                "....BBBBBB....",
-                "...BBBBBBBB...",
-                "<..BBAABBBB..E",
-                "...BBBBBBBB...",
-                "....BBBBBB....",
-                "...F.BBBB.F...",
-                "....FFBBFF....",
+                "....FFBAFF....",
+                "...F.ABAB.F...",
+                "....BABABA....",
+                "...BBABABAB...",
+                "<..BBABABAB..E",
+                "...BBABABAB...",
+                "....BABABA....",
+                "...F.ABAB.F...",
+                "....FFBAFF....",
                 ".....FFFF.....",
                 "......FF......",
             ],
