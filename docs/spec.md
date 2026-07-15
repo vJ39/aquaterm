@@ -239,10 +239,10 @@ aquazone 風の熱帯魚育成ツールをターミナルで動かす。termmap 
 - **カニの片付け対象から除外**: クジラの死骸は`update_crabs`の亡骸片付けロジックの対象から除外する(通常の死骸と同じ扱いで片付けられてしまうと、着地後60秒の間にカニに消化されて爆発の機会が失われてしまうため)。他の死骸(通常種・ピラニア・タコ)は従来どおりカニに片付けられる
 - **爆発時の演出**:
   - 効果音`SfxEvent::WhaleExplosion`(低く重い一発の爆発音)を鳴らす
-  - クジラ自身の位置を中心に、肉片・血飛沫の巨大・濃い赤バリエーション(`EffectKind::WhaleGore`)を`WHALE_EXPLOSION_GORE_PARTICLE_COUNT`(60個。通常の血飛沫`BLOOD_PARTICLE_COUNT`=10個の6倍)散らす。散らばる範囲(`WHALE_EXPLOSION_GORE_SPREAD_RADIUS`=30.0)・残る時間(`WHALE_EXPLOSION_GORE_LIFETIME`=4.0秒)も通常の血飛沫より大幅に強化してある。描画側(main.rs)では、通常の血飛沫(Blood)の3色(濃い暗赤・赤黒・ピンク寄りの赤)よりさらに暗く濃い3色を割り当て、塊の大きさ(十字方向のオフセット)・飛び散る範囲・粒子数のいずれも通常より一段大きくして描く
+  - クジラ自身の位置を中心に、肉片・血飛沫の巨大・濃い赤バリエーション(`EffectKind::WhaleGore`)を`WHALE_EXPLOSION_GORE_PARTICLE_COUNT`(60個。通常の血飛沫`BLOOD_PARTICLE_COUNT`=10個の6倍)散らす。散らばる範囲(`WHALE_EXPLOSION_GORE_SPREAD_RADIUS`=30.0)・残る時間(`WHALE_EXPLOSION_GORE_LIFETIME`=5.0秒。通常の血飛沫より大幅に長い)も通常の血飛沫より大幅に強化してある。描画側(main.rs)では、通常の血飛沫(Blood)の3色(濃い暗赤・赤黒・ピンク寄りの赤)よりさらに暗く濃い3色を割り当て、塊の大きさ(十字方向のオフセット)・飛び散る範囲・粒子数のいずれも通常より一段大きくして描く
   - 爆発地点に巨大な血の滲み(`whale_gore_stains`、通常の血の滲み`blood_stains`と同じ「同心円状に広がってフェードアウトする」構造を再利用した専用のVec)を1つ残す。最大半径(`WHALE_EXPLOSION_STAIN_MAX_RADIUS`=45.0)は通常の血の滲み(`BLOOD_STAIN_MAX_RADIUS`=20.0)より大きく、色もより濃い赤にしてある
   - 水質(pollution)を即座に`POLLUTION_MAX`(最悪)まで悪化させる
-  - 画面全体を一時的に真っ赤に染めるオーバーレイ(`whale_explosion_flash`)を立てる。`WHALE_EXPLOSION_FLASH_LIFETIME`(2.5秒)にかけて減衰し、`color::apply_whale_explosion_flash`(既存の水質の濁り`apply_murkiness`・浄化剤の紫染め`apply_purifier_tint`と同じ「色を混ぜるだけ」の考え方の関数)で描画側(main.rs)が全ピクセルへ適用する。水中の背景色だけでなく、魚・エフェクトを描き終えた最終合成の上からさらに赤を混ぜる、画面全体を覆う最前面の一枚として扱う
+  - 画面全体を一時的に真っ赤に染めるオーバーレイ(`whale_explosion_flash`)を立てる。一瞬のフラッシュではなく、しばらく赤いフォグに包まれ続けてから徐々に晴れていく演出として`WHALE_EXPLOSION_FLASH_LIFETIME`(30.0秒)にかけて減衰し、`color::apply_whale_explosion_flash`(既存の水質の濁り`apply_murkiness`・浄化剤の紫染め`apply_purifier_tint`と同じ「色を混ぜるだけ」の考え方の関数)で描画側(main.rs)が全ピクセルへ適用する。減衰カーブは残り時間に比例した線形のまま。水中の背景色だけでなく、魚・エフェクトを描き終えた最終合成の上からさらに赤を混ぜる、画面全体を覆う最前面の一枚として扱う
   - 画面内の生きている個体(`fish`配列に含まれる全種。通常5種・ピラニア・タコ・他のクジラを含む)を、ピラニアに食われた時と同じ出血死アニメーション(`dead`/`dead_timer=0.0`にし、通常の`BLOOD_PARTICLE_COUNT`・`BLOOD_SPREAD_RADIUS`・`BLOOD_EFFECT_LIFETIME`・`BLOOD_STAIN_LIFETIME`をそのまま使う血飛沫・血の滲みを出す)で即死させる。爆発したクジラ自身は対象外(既にこの爆発で消える)。実装判断として、カニ・エビ・タツノオトシゴのような観賞用背景生物(そもそも`dead`状態を持たない構造体)は対象外にした
   - クジラの死骸自体は爆発で`fish`配列から除去される(通常の死骸のようにCORPSE_REMOVE_TIME経過やカニの片付けを待たず、この場で消える)
 - **デバッグ用ショートカット(新規キー `B`)**: `WHALE_EXPLOSION_DELAY`(60秒)を待たずに即座に大爆発を試せるようにする要望への対応。`B`キーで、`fish`配列の中から最初に見つかったクジラ(生死は問わない)を対象に`trigger_whale_explosion`を直接呼ぶ(`debug_explode_whale`)。クジラが存在しない場合は何もせずメッセージだけ出す

@@ -249,7 +249,7 @@ pub const WHALE_EXPLOSION_DELAY: f64 = 60.0;
 // 通常の血飛沫より一段濃い赤にする)。
 pub const WHALE_EXPLOSION_GORE_PARTICLE_COUNT: usize = 60; // 通常の血飛沫(10個)の6倍散らす
 pub const WHALE_EXPLOSION_GORE_SPREAD_RADIUS: f64 = 30.0; // 通常(6.0)の5倍広い範囲に飛び散る
-pub const WHALE_EXPLOSION_GORE_LIFETIME: f64 = 4.0; // 通常(1.6秒)より長く残る
+pub const WHALE_EXPLOSION_GORE_LIFETIME: f64 = 5.0; // 通常(1.6秒)より長く残る
 // クジラの爆発地点に残る巨大な血の滲み。通常の血の滲み(BLOOD_STAIN_MAX_RADIUS=20.0)
 // より一段大きく・濃い赤にした専用バリエーションで、main.rs側で別のVec
 // (whale_gore_stains)として描画する(ink_clouds/purify_bloomsと同じ、専用の
@@ -261,8 +261,10 @@ pub const WHALE_EXPLOSION_STAIN_HOLD_FRACTION: f64 = 0.6;
 pub const WHALE_EXPLOSION_STAIN_MIX: f64 = 0.97; // 通常の血の滲み(0.93)よりさらに濃い
 // 爆発の瞬間、画面全体を真っ赤に染める一時オーバーレイの持続時間。main.rs側で
 // color::apply_whale_explosion_flashへ渡すintensity(1.0=発生直後→0.0=消灯)の
-// 基準にする。
-pub const WHALE_EXPLOSION_FLASH_LIFETIME: f64 = 2.5;
+// 基準にする。一瞬のフラッシュではなく、しばらく赤いフォグに包まれ続けてから
+// 徐々に晴れていく演出にするため長めの秒数にしてある(減衰カーブ自体は残り時間に
+// 比例した線形のまま)。
+pub const WHALE_EXPLOSION_FLASH_LIFETIME: f64 = 30.0;
 
 // --- 観賞用の追加生物(育成ロジック対象外。カニ・エビ・タツノオトシゴ。
 // 大型魚は Species::Piranha として通常の育成対象に統合された) ---
