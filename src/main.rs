@@ -167,7 +167,7 @@ fn run() -> std::io::Result<()> {
     // が&mut Ctlを取るため)。
     // 複数水槽(名前付き保存): 前回開いていた水槽名を解決する(旧固定パスの
     // セーブしか無い場合は"default"という名前の水槽として自動移行する)。
-    let (tank_name, saved) = persist::resolve_startup_tank();
+    let (tank_name, startup_state) = persist::resolve_startup_tank();
 
     let mut ctl = Ctl {
         paused: false,
@@ -198,14 +198,23 @@ fn run() -> std::io::Result<()> {
     // current_tank.txtが無い場合もここで作られる)。
     let _ = persist::save_current_tank_name(&tank_name);
 
-    let mut help = saved.is_none(); // 初回のみヘルプ自動表示
-    match saved {
-        Some(state) => {
+    // 初回起動、および破損セーブを検知して新規水槽にフォールバックした場合の
+    // 両方でヘルプを自動表示する(いずれもseed_initial直後で見た目は同じ「まだ
+    // 何も無い水槽」のため)。
+    let mut help = !matches!(startup_state, persist::LoadOutcome::Loaded(_));
+    match startup_state {
+        persist::LoadOutcome::Loaded(state) => {
             persist::restore_into(&mut sim, &mut ctl, state);
             // 旧セーブには観賞用エンティティが無いため、空なら補充する
             sim.ensure_decorative_entities(fb.pix_width(), fb.pix_height());
         }
-        None => sim.seed_initial(fb.pix_width(), fb.pix_height()),
+        persist::LoadOutcome::Missing => sim.seed_initial(fb.pix_width(), fb.pix_height()),
+        persist::LoadOutcome::Corrupted => {
+            sim.seed_initial(fb.pix_width(), fb.pix_height());
+            // 破損したセーブは既に".broken"へ退避済み。黙って新規水槽として
+            // 始めるのではなく、その事実をユーザーに見えるようにする。
+            sim.set_message("以前のセーブが壊れていたため.brokenへ退避し、新規水槽として開始しました");
+        }
     }
 
     // 効果音エンジン: オーディオデバイスが無い/初期化失敗でも SoundEngine::new() 自体は
@@ -788,7 +797,7 @@ fn switch_to_existing_tank(sim: &mut Simulation, fb: &FrameBuffer, ctl: &mut Ctl
     }
     let _ = persist::save_named(sim, ctl, &ctl.current_tank);
     match persist::load_named(name) {
-        Some(state) => {
+        persist::LoadOutcome::Loaded(state) => {
             persist::restore_into(sim, ctl, state);
             // 旧セーブ(観賞用エンティティが無いもの)を読んだ場合の補充。
             sim.ensure_decorative_entities(fb.pix_width(), fb.pix_height());
@@ -796,7 +805,12 @@ fn switch_to_existing_tank(sim: &mut Simulation, fb: &FrameBuffer, ctl: &mut Ctl
             let _ = persist::save_current_tank_name(name);
             sim.set_message(format!("水槽「{name}」に切替"));
         }
-        None => {
+        persist::LoadOutcome::Corrupted => {
+            // 破損したセーブは既に".broken"へ退避済み。黙って諦めるのではなく
+            // 何が起きたかをユーザーに見えるようにする(切替自体は行わない)。
+            sim.set_message(format!("水槽「{name}」のセーブが壊れていたため.brokenへ退避しました"));
+        }
+        persist::LoadOutcome::Missing => {
             sim.set_message(format!("水槽「{name}」の読み込みに失敗しました"));
         }
     }

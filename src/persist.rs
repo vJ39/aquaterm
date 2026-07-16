@@ -4,10 +4,20 @@
 use crate::fish::Fish;
 use crate::sim::{Crab, Den, Egg, Food, Meat, Medicine, Plant, Purifier, Rock, Seahorse, Shrimp, Simulation, Star};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+// セーブ形式のバージョン。今回はフィールドを追加して読み書きできるようにする
+// だけで、バージョン番号に応じた移行ロジックは実装しない(将来の互換性のための
+// 土台)。保存時は常にこの値を書き込む。
+pub const SAVE_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 pub struct SavedState {
+    // セーブ形式のバージョン。旧セーブ(キーが無いもの)は#[serde(default)]で
+    // 0扱いにする。
+    #[serde(default)]
+    pub version: u32,
     pub fish: Vec<Fish>,
     pub food: Vec<Food>,
     #[serde(default)]
@@ -178,24 +188,95 @@ fn legacy_state_path_in(base: &Path) -> PathBuf {
     base.join("state.json")
 }
 
-fn load_legacy_in(base: &Path) -> Option<SavedState> {
-    let data = std::fs::read_to_string(legacy_state_path_in(base)).ok()?;
-    serde_json::from_str(&data).ok()
+// セーブの読み込み結果。「ファイルが単に存在しない(新規水槽として正常)」場合と、
+// 「ファイルはあるが読み込み・JSON解析に失敗した(破損)」場合を区別できるように
+// する。呼び出し元はCorruptedを見て、ユーザーに見える通知を出す。
+pub enum LoadOutcome {
+    // ファイルが存在しない。新規水槽としてそのまま初期化してよい。
+    Missing,
+    // ファイルは存在したが読み込み・解析に失敗した(破損)。この結果を返す前に
+    // 元のファイルは`.broken`へ退避済みなので、次回同名で保存し直しても
+    // 壊れていた版が失われることはない。
+    Corrupted,
+    // 正常に読み込めた。
+    Loaded(SavedState),
 }
 
+// 破損したセーブファイルを"<元のパス>.broken"へ退避する。次回同名で保存し
+// 直した際に、壊れていた版を完全に失わないための処置。既に.brokenが残っている
+// 場合は最新の破損内容で上書きする(退避は直近1世代分のみ保持する)。rename
+// 自体が失敗しても(パーミッション等)読み込み処理は続行できるよう、エラーは
+// 握りつぶす。
+fn quarantine_broken_file(path: &Path) {
+    let _ = std::fs::rename(path, broken_path_for(path));
+}
+
+fn broken_path_for(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".broken");
+    PathBuf::from(os)
+}
+
+fn tmp_path_for(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".tmp");
+    PathBuf::from(os)
+}
+
+// pathからSavedStateを読み込み、「無い/壊れている(かつ退避した)/読めた」を
+// 判定する共通処理(名前付き水槽・旧固定パスの両方から使う)。
+fn read_saved_state_outcome(path: &Path) -> LoadOutcome {
+    match std::fs::read_to_string(path) {
+        Ok(data) => match serde_json::from_str::<SavedState>(&data) {
+            Ok(state) => LoadOutcome::Loaded(state),
+            Err(_) => {
+                // ファイルは読めたがJSONとして解析できない = 破損。
+                quarantine_broken_file(path);
+                LoadOutcome::Corrupted
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LoadOutcome::Missing,
+        Err(_) => {
+            // ファイルは存在するが読み込めない(権限等)。破損に準じて扱い、
+            // 可能であれば退避する(失敗しても致命的ではない)。
+            quarantine_broken_file(path);
+            LoadOutcome::Corrupted
+        }
+    }
+}
+
+fn load_legacy_outcome_in(base: &Path) -> LoadOutcome {
+    read_saved_state_outcome(&legacy_state_path_in(base))
+}
+
+// アトミックな書き込み: 直接pathへ書くと、書き込み中にプロセスが落ちる・
+// ディスクエラーが起きた場合に、壊れたJSONがそのままセーブファイルとして
+// 残ってしまう。同じディレクトリに一時ファイル(`<path>.tmp`)を書いて
+// フラッシュしてから、renameで本来のパスへ置き換える(renameは同一ファイル
+// システム内であればアトミックに入れ替わる。途中で失敗しても本来のpathには
+// 影響しない)。
 fn write_saved_state_to(path: &Path, state: &SavedState) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(path, json)
+
+    let tmp_path = tmp_path_for(path);
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
 }
 
 // Simulation/Ctlの現在値からSavedStateを組み立てる(保存先が複数(水槽ごと)に
 // 分かれても、組み立てロジック自体は1箇所にまとめておく)。
 fn build_saved_state(sim: &Simulation, ctl: &crate::Ctl) -> SavedState {
     SavedState {
+        version: SAVE_VERSION,
         fish: sim.fish.clone(),
         food: sim.food.clone(),
         medicine: sim.medicine.clone(),
@@ -237,10 +318,23 @@ fn save_named_in(base: &Path, sim: &Simulation, ctl: &crate::Ctl, name: &str) ->
     write_saved_state_to(&path, &build_saved_state(sim, ctl))
 }
 
+fn load_named_outcome_in(base: &Path, name: &str) -> LoadOutcome {
+    let path = match tank_path_in(base, name) {
+        Some(p) => p,
+        None => return LoadOutcome::Missing, // 無効な名前=保存先自体が無い
+    };
+    read_saved_state_outcome(&path)
+}
+
+// Option<SavedState>だけ欲しいテスト向けの薄いラッパー(本体・main.rs側は
+// LoadOutcomeベースのload_named_outcome_in/load_namedを直接使うため、こちらは
+// テストコードからのみ参照される)。
+#[cfg(test)]
 fn load_named_in(base: &Path, name: &str) -> Option<SavedState> {
-    let path = tank_path_in(base, name)?;
-    let data = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&data).ok()
+    match load_named_outcome_in(base, name) {
+        LoadOutcome::Loaded(state) => Some(state),
+        LoadOutcome::Missing | LoadOutcome::Corrupted => None,
+    }
 }
 
 // 保存済みの水槽名の一覧(拡張子抜き・ソート済み)。ディレクトリが無ければ空。
@@ -289,21 +383,34 @@ fn load_current_tank_name_in(base: &Path) -> Option<String> {
 //    水槽として取り込む(tanks/default.jsonがまだ無いときだけ行う。既にあるものを
 //    黙って上書きしない = ユーザーの既存の進行中データを黙って消さないための
 //    一回限りの移行)。
-// 3. どちらも無ければ新規インストールとして"default"を返す(SavedStateはNone。
-//    呼び出し側でseed_initial等の初期化を行う)。
-fn resolve_startup_tank_in(base: &Path) -> (String, Option<SavedState>) {
+// 3. どちらも無ければ新規インストールとして"default"を返す(LoadOutcome::Missing。
+//    呼び出し側でseed_initial等の初期化を行う)。破損(LoadOutcome::Corrupted)を
+//    検知した場合も呼び出し側へそのまま伝える(壊れたファイルは、この時点で
+//    既に読み込み処理の中で`.broken`へ退避済み)。
+fn resolve_startup_tank_in(base: &Path) -> (String, LoadOutcome) {
     if let Some(name) = load_current_tank_name_in(base) {
-        let state = load_named_in(base, &name);
-        return (name, state);
+        let outcome = load_named_outcome_in(base, &name);
+        return (name, outcome);
     }
-    if load_named_in(base, DEFAULT_TANK_NAME).is_none() {
-        if let Some(legacy) = load_legacy_in(base) {
-            if let Some(path) = tank_path_in(base, DEFAULT_TANK_NAME) {
-                let _ = write_saved_state_to(&path, &legacy);
+    let default_outcome = load_named_outcome_in(base, DEFAULT_TANK_NAME);
+    if let LoadOutcome::Missing = default_outcome {
+        match load_legacy_outcome_in(base) {
+            LoadOutcome::Loaded(legacy) => {
+                if let Some(path) = tank_path_in(base, DEFAULT_TANK_NAME) {
+                    let _ = write_saved_state_to(&path, &legacy);
+                }
+                return (DEFAULT_TANK_NAME.to_string(), load_named_outcome_in(base, DEFAULT_TANK_NAME));
             }
+            LoadOutcome::Corrupted => {
+                // 旧セーブ自体が壊れていた(既に退避済み)。移行元が無いのと同じ
+                // 扱いで新規水槽として初期化するが、破損があった事実は呼び出し
+                // 側に伝える。
+                return (DEFAULT_TANK_NAME.to_string(), LoadOutcome::Corrupted);
+            }
+            LoadOutcome::Missing => {}
         }
     }
-    (DEFAULT_TANK_NAME.to_string(), load_named_in(base, DEFAULT_TANK_NAME))
+    (DEFAULT_TANK_NAME.to_string(), default_outcome)
 }
 
 // --- ここから公開API(実際の ~/.config/aquaterm を使う) -------------------
@@ -321,9 +428,13 @@ pub fn save_named(sim: &Simulation, ctl: &crate::Ctl, name: &str) -> std::io::Re
     }
 }
 
-// 指定した名前の水槽を読み込む。無ければ None。
-pub fn load_named(name: &str) -> Option<SavedState> {
-    load_named_in(&config_dir()?, name)
+// 指定した名前の水槽を読み込む。「無い」場合と「壊れている」場合を区別できる
+// LoadOutcomeを返す(呼び出し元は破損時にユーザーへ通知を出せる)。
+pub fn load_named(name: &str) -> LoadOutcome {
+    match config_dir() {
+        Some(base) => load_named_outcome_in(&base, name),
+        None => LoadOutcome::Missing,
+    }
 }
 
 // 現在開いている水槽名を記録する(次回起動時に同じ水槽を開くため)。
@@ -335,10 +446,10 @@ pub fn save_current_tank_name(name: &str) -> std::io::Result<()> {
 }
 
 // 起動時にどの水槽を開くかを解決する(旧固定パスからの自動移行込み)。
-pub fn resolve_startup_tank() -> (String, Option<SavedState>) {
+pub fn resolve_startup_tank() -> (String, LoadOutcome) {
     match config_dir() {
         Some(base) => resolve_startup_tank_in(&base),
-        None => (DEFAULT_TANK_NAME.to_string(), None),
+        None => (DEFAULT_TANK_NAME.to_string(), LoadOutcome::Missing),
     }
 }
 
@@ -398,6 +509,7 @@ mod tests {
     // 各テストで必要な項目だけ変えられるよう、最小限のSavedStateを返す。
     fn minimal_saved_state() -> SavedState {
         SavedState {
+            version: SAVE_VERSION,
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
@@ -533,9 +645,12 @@ mod tests {
         write_saved_state_to(&legacy_state_path_in(&base), &legacy).expect("旧セーブを書き込めるはず");
 
         // current_tank.txtもtanks/default.jsonも無い状態から解決する。
-        let (name, state) = resolve_startup_tank_in(&base);
+        let (name, outcome) = resolve_startup_tank_in(&base);
         assert_eq!(name, "default");
-        let state = state.expect("旧セーブがdefault水槽として読めるはず");
+        let state = match outcome {
+            LoadOutcome::Loaded(s) => s,
+            _ => panic!("旧セーブがdefault水槽として読めるはず"),
+        };
         assert_eq!(state.elapsed, 999.0, "旧セーブの内容を失わずに引き継ぐはず");
 
         // 移行によってtanks/default.jsonが実際に作られているはず(次回以降も残る)。
@@ -556,9 +671,12 @@ mod tests {
         write_saved_state_to(&tank_path_in(&base, "reef").unwrap(), &other).unwrap();
         save_current_tank_name_in(&base, "reef").unwrap();
 
-        let (name, state) = resolve_startup_tank_in(&base);
+        let (name, outcome) = resolve_startup_tank_in(&base);
         assert_eq!(name, "reef", "current_tank.txtの記録を最優先するはず");
-        assert_eq!(state.unwrap().elapsed, 42.0);
+        match outcome {
+            LoadOutcome::Loaded(s) => assert_eq!(s.elapsed, 42.0),
+            _ => panic!("reef水槽を読めるはず"),
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -576,13 +694,16 @@ mod tests {
         legacy.elapsed = 9999.0;
         write_saved_state_to(&legacy_state_path_in(&base), &legacy).unwrap();
 
-        let (name, state) = resolve_startup_tank_in(&base);
+        let (name, outcome) = resolve_startup_tank_in(&base);
         assert_eq!(name, "default");
-        assert_eq!(
-            state.unwrap().elapsed,
-            7.0,
-            "既存のdefault水槽を優先し、旧セーブで上書きしないはず"
-        );
+        match outcome {
+            LoadOutcome::Loaded(s) => assert_eq!(
+                s.elapsed,
+                7.0,
+                "既存のdefault水槽を優先し、旧セーブで上書きしないはず"
+            ),
+            _ => panic!("既存のdefault水槽を読めるはず"),
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -590,9 +711,12 @@ mod tests {
     #[test]
     fn resolve_with_no_legacy_save_and_no_marker_falls_back_to_fresh_default() {
         let base = temp_base_dir("fresh-install");
-        let (name, state) = resolve_startup_tank_in(&base);
+        let (name, outcome) = resolve_startup_tank_in(&base);
         assert_eq!(name, "default");
-        assert!(state.is_none(), "何もセーブが無ければNone(呼び出し側で初期化)のはず");
+        assert!(
+            matches!(outcome, LoadOutcome::Missing),
+            "何もセーブが無ければMissing(呼び出し側で初期化)のはず"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -603,6 +727,7 @@ mod tests {
         // 藻・水草・タコつぼも保存対象であることの回帰テスト。保存しないと再起動時に
         // 位置が再抽選され、隠れているタコのden_x/den_y(Fish側)と食い違ってしまう。
         let state = SavedState {
+            version: SAVE_VERSION,
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
@@ -716,6 +841,7 @@ mod tests {
         // 保存/復元できることの回帰テスト。既定値とは異なる値を使い、単純な
         // 既定値表示ではなく実際に値が往復していることを確認する。
         let state = SavedState {
+            version: SAVE_VERSION,
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
@@ -772,6 +898,7 @@ mod tests {
         // エビ・タツノオトシゴ(観賞用背景生物)も保存対象であることの回帰テスト。
         use crate::sim::{Seahorse, Shrimp};
         let state = SavedState {
+            version: SAVE_VERSION,
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
@@ -828,6 +955,7 @@ mod tests {
         // 位置が再抽選されてしまう。
         use crate::sim::Rock;
         let state = SavedState {
+            version: SAVE_VERSION,
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
@@ -872,6 +1000,7 @@ mod tests {
         // 再起動のたびに出現中のスターが消えてしまう。
         use crate::sim::Star;
         let state = SavedState {
+            version: SAVE_VERSION,
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
@@ -920,6 +1049,7 @@ mod tests {
         // 浄化剤(沈下中の個体)と浄化剤の濃度も保存対象であることの回帰テスト。
         // 保存しないと、効果継続中や沈下途中の状態が再起動でリセットされてしまう。
         let state = SavedState {
+            version: SAVE_VERSION,
             fish: Vec::new(),
             food: Vec::new(),
             medicine: Vec::new(),
@@ -961,5 +1091,96 @@ mod tests {
         assert_eq!(restored.purifiers.len(), 1);
         assert_eq!(restored.purifiers[0].x, 18.0);
         assert_eq!(restored.purifier_concentration, 0.6);
+    }
+
+    // --- アトミックな保存 -----------------------------------------------------
+    #[test]
+    fn saving_leaves_no_tmp_file_behind() {
+        // 一時ファイル(.tmp)へ書いてからrenameするため、保存が成功した後は
+        // .tmpが残っていないはず(残っていたら本来のファイルとの入れ替えに
+        // 失敗している)。
+        let base = temp_base_dir("no-tmp-leftover");
+        let path = tank_path_in(&base, "reef").expect("有効な名前のはず");
+
+        write_saved_state_to(&path, &minimal_saved_state()).expect("書き込めるはず");
+
+        assert!(path.exists(), "本体ファイルが作られているはず");
+        assert!(!tmp_path_for(&path).exists(), "一時ファイルは残らないはず");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // --- 破損したセーブの検知と退避 ---------------------------------------------
+    #[test]
+    fn corrupted_save_is_distinguished_from_missing_save() {
+        // 「ファイルが無い(新規水槽として正常)」と「ファイルはあるが解析に
+        // 失敗した(破損)」は異なる結果になるはず。
+        let base = temp_base_dir("corrupted-vs-missing");
+        let path = tank_path_in(&base, "reef").expect("有効な名前のはず");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "これは正しいJSONではない{{{").expect("壊れたデータを書き込めるはず");
+
+        let corrupted = load_named_outcome_in(&base, "reef");
+        assert!(
+            matches!(corrupted, LoadOutcome::Corrupted),
+            "解析に失敗した場合はCorruptedのはず"
+        );
+
+        let missing = load_named_outcome_in(&base, "no-such-tank");
+        assert!(
+            matches!(missing, LoadOutcome::Missing),
+            "ファイルが本当に存在しない場合はMissingのはず(破損と区別されるはず)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn corrupted_save_is_quarantined_and_the_slot_can_be_reused() {
+        // 破損ファイルは黙って上書き・放棄されず、`.broken`へ退避されるはず。
+        // その後、同名で保存し直せば正常に使い続けられるはず。
+        let base = temp_base_dir("quarantine");
+        let path = tank_path_in(&base, "reef").expect("有効な名前のはず");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not valid json").expect("壊れたデータを書き込めるはず");
+
+        let outcome = load_named_outcome_in(&base, "reef");
+        assert!(matches!(outcome, LoadOutcome::Corrupted));
+        assert!(!path.exists(), "壊れたファイルは元のパスから退避されるはず");
+        assert!(
+            broken_path_for(&path).exists(),
+            "壊れていた版が.brokenへ残っているはず(完全には失われない)"
+        );
+
+        let mut fresh = minimal_saved_state();
+        fresh.elapsed = 55.0;
+        write_saved_state_to(&path, &fresh).expect("退避後も同名で保存し直せるはず");
+
+        let reloaded = load_named_in(&base, "reef").expect("保存し直した内容を読めるはず");
+        assert_eq!(reloaded.elapsed, 55.0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // --- セーブ形式のバージョン ------------------------------------------------
+    #[test]
+    fn version_survives_a_serialize_round_trip() {
+        // 将来の移行ロジックの土台となるバージョン番号も保存/復元できることの
+        // 回帰テスト。既定値(SAVE_VERSION)とは異なる値を使い、単純な既定値
+        // 表示ではなく実際に値が往復していることを確認する。
+        let mut state = minimal_saved_state();
+        state.version = 7;
+        let json = serde_json::to_string(&state).expect("シリアライズできるはず");
+        let restored: SavedState = serde_json::from_str(&json).expect("デシリアライズできるはず");
+        assert_eq!(restored.version, 7);
+    }
+
+    #[test]
+    fn old_save_without_version_field_defaults_to_zero() {
+        // versionキーが無い旧形式のJSONも、エラーにならず読み込め、
+        // versionは0(未知の旧バージョン)扱いになるはず。
+        let old_json = r#"{"fish":[],"food":[],"elapsed":0.0}"#;
+        let restored: SavedState = serde_json::from_str(old_json).expect("旧セーブも読めるはず");
+        assert_eq!(restored.version, 0, "versionキーが無い旧セーブは0扱いになるはず");
     }
 }
