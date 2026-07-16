@@ -630,6 +630,12 @@ q       終了
 - スプライトの参照分離: 壁際マージン・`render_scale`・口の位置(`mouth_position`)など判定に使う`Fish::sprite()`は、ターン演出の影響を受けず常に通常の横向きプロファイルを返す。実際の画面描画にだけ使う`Fish::display_sprite()`を別に用意し、ターン中はこちらだけが`with_turn_flex`で変形したスプライトを返す(`main.rs`の描画箇所のみ`display_sprite()`を呼ぶ)。演出用の一時的な見た目の変化が、捕食判定や壁際の当たり判定など物理寄りの計算に影響しないようにするための分離
 - 対象種: 専用ドット絵を持たず現在のプロファイルを変形するだけの仕組みなので、種を問わず全種(ピラニア・タコ・クジラも含む)に自動的に適用される
 
+## panic時の端末復旧(RAIIガード、新規・2026/07/16)
+- 課題: `run()`が`?`でErrを返して終了する経路は`main()`側で端末の後始末(raw mode解除・alternate screen終了・カーソル表示)を行えていたが、メインループの途中でpanic(配列範囲外アクセス・`unwrap`/`expect`失敗・`assert`失敗など)が起きた場合はこの経路を通らず、後始末が行われないまま端末がraw mode・alternate screen・カーソル非表示の状態で残ってしまう(端末を再起動するか`reset`コマンドを打つ必要が出る)
+- 対応: 端末の後始末(`execute_teardown`相当の処理)を`Drop`トレイトに持たせた`TerminalGuard`構造体を導入する。`run()`冒頭で`execute_setup`を実行した戻り値として`TerminalGuard`を生成し、変数(`_terminal`)に束縛して関数のスコープが終わるまで保持する。Rustの言語仕様上、値の`Drop`実装は変数がスコープを抜けるときに呼ばれ、これは通常のreturnだけでなくpanicによるスタックアンワインド中のスタック解体でも成り立つ(`panic = "abort"`を指定していない限り)ため、`?`による早期returnとpanicのどちらの経路でも端末が復旧される
+- `main()`側で明示的に呼んでいた後始末処理は、`TerminalGuard`のDropに一本化して削除した(エラーメッセージの表示と終了コードの設定は残す)。`run()`が返る時点で内部の`TerminalGuard`は既にDrop済み(端末は復旧済み)のため、二重に呼ぶ必要がない
+- テストについての注記: `TerminalGuard`のDropが実際に`enable_raw_mode`/`disable_raw_mode`やalternate screenの切替を行うため、制御端末(TTY)を持たないヘッドレスなCI環境ではこれを直接使うテストが安定して書けない(`enable_raw_mode`自体がTTYの無い環境では失敗しうる)。代わりに、`TerminalGuard`のDropが依拠している言語機構そのもの(`catch_unwind`で捕捉したpanicのアンワインド中でも、保持していた値の`Drop`は呼ばれること)を、実際の端末I/Oを伴わない軽量な代替の型を使って単体テストで確認している
+
 ## MVP に含めないもの(将来検討)
 - 複数水槽・レイアウト編集
 - 設定のTOML化(termmap の config.toml 相当。最初は固定値でよい)

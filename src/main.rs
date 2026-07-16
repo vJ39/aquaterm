@@ -129,9 +129,10 @@ const MAX_FISH_CAP_STEP: usize = 1;
 const MAX_FISH_CAP_STEP_FAST: usize = 5;
 
 fn main() {
+    // run()がErrで返る時点で、内部で保持しているTerminalGuardは既にスコープを
+    // 抜けてdrop済み(端末は復旧済み)なので、ここで改めてteardownを呼ぶ必要はない。
+    // エラーメッセージの表示と終了コードの設定だけ行う。
     if let Err(e) = run() {
-        let mut out = std::io::stdout();
-        let _ = execute_teardown(&mut out);
         eprintln!("aquaterm error: {e}");
         std::process::exit(1);
     }
@@ -150,9 +151,52 @@ fn execute_teardown(out: &mut Stdout) -> std::io::Result<()> {
     Ok(())
 }
 
+// 端末状態(raw mode・alternate screen・カーソル非表示)の後始末を保証するRAIIガード。
+//
+// 背景: `run()`が`?`で早期returnするケースは`main()`側の`if let Err(e) = run()`で
+// teardownを呼べるが、メインループの途中でpanic(unwrap/expect/index範囲外・assert
+// 失敗等)が起きた場合はこの経路を通らず、raw mode・alternate screen・カーソル非表示
+// のまま端末が壊れた状態で残ってしまう。
+//
+//対策: teardownの呼び出しをDropトレイトに持たせ、`run()`冒頭でこのガードを変数に
+//束縛して保持する。Rustの言語仕様上、Drop実装は変数がスコープを抜けるときに
+// 呼ばれ、これは通常のreturnだけでなく、panicによるスタックアンワインド中の
+// スタック解体でも成り立つ(`panic = "abort"`を指定していない限り)。このため、
+// `?`による早期returnとpanicのどちらでも端末が復旧される。
+//
+// 実際にpanicを発生させてこのDropが動くことを確認する単体テストは、Drop内で
+// enable_raw_mode/disable_raw_modeやalternate screenの切替を伴うため、制御端末
+// (TTY)を持たないヘッドレスなCI環境では前提が崩れやすく書きにくい。代わりに、
+// このDrop実装が依拠している言語機構そのもの(catch_unwind越しでもDropが呼ばれる
+// こと)を、テスト内で定義した軽量な代替の型を使って確認している
+// (tests::drop_runs_during_panic_unwind_like_terminal_guard_relies_on参照)。
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter(out: &mut Stdout) -> std::io::Result<Self> {
+        execute_setup(out)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        // Dropは&mut selfしか受け取れないため、run()側が持つStdoutハンドルを
+        // そのまま受け渡すことはできないが、標準出力はプロセス単位で1つの
+        // ストリームなので、ここで新たに取得したハンドルに書き込んでも実体は
+        // run()側のものと同じで問題ない。
+        let mut out = std::io::stdout();
+        let _ = execute_teardown(&mut out);
+    }
+}
+
 fn run() -> std::io::Result<()> {
     let mut out = std::io::stdout();
-    execute_setup(&mut out)?;
+    // 早期returnだけでなくpanicによるアンワインド時も端末を復旧できるよう、
+    // execute_setupの実行結果をこのガードで保持する(詳細はTerminalGuardのコメント参照)。
+    // `_terminal`という名前は「使わないが保持し続ける」ことを示す慣習的な命名で、
+    // `_`(即座にdropされる)にはしない。
+    let _terminal = TerminalGuard::enter(&mut out)?;
 
     let (mut cols, mut rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let (mut cols_u, mut cell_rows) = sane_size(cols, rows);
@@ -351,7 +395,8 @@ fn run() -> std::io::Result<()> {
 
     let _ = persist::save_named(&sim, &ctl, &ctl.current_tank);
     let _ = persist::save_current_tank_name(&ctl.current_tank);
-    execute_teardown(&mut out)?;
+    // ここで明示的にteardownを呼ぶ必要はない。この後`_terminal`(TerminalGuard)が
+    // 関数末尾でスコープを抜けてdropされ、そこでteardownが行われる。
     Ok(())
 }
 
@@ -2306,6 +2351,45 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // TerminalGuardのDrop実装(execute_teardownの呼び出し)がpanic経由でも実行される
+    // ことを直接確認するテストは、enable_raw_mode/disable_raw_modeやalternate
+    // screenの切替を実際に伴うため、制御端末(TTY)を持たないヘッドレスなCI環境では
+    // 前提(端末が存在すること)が崩れやすく、安定して書けない。
+    //
+    // 代わりに、TerminalGuardのDropが依拠しているのと全く同じRustの言語機構
+    // ——catch_unwindでpanicを捕捉した場合でも、アンワインドの過程で保持していた
+    // 値のDropは呼ばれる——を、実際の端末I/Oを伴わない軽量な代替の型で確認する。
+    // この機構が成立している以上、同じ形でDropを実装しているTerminalGuardも
+    // panic時にexecute_teardownを実行できると言える。
+    #[test]
+    fn drop_runs_during_panic_unwind_like_terminal_guard_relies_on() {
+        use std::panic;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static DROPPED: AtomicBool = AtomicBool::new(false);
+        DROPPED.store(false, Ordering::SeqCst);
+
+        struct MarksDroppedOnDrop;
+        impl Drop for MarksDroppedOnDrop {
+            fn drop(&mut self) {
+                DROPPED.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let result = panic::catch_unwind(|| {
+            // TerminalGuardをrun()冒頭で`let _terminal = ...`に束縛するのと同じ形で、
+            // panicが起きるスコープの先頭で値を保持する。
+            let _guard = MarksDroppedOnDrop;
+            panic!("intentional panic to exercise unwind-time Drop");
+        });
+
+        assert!(result.is_err(), "catch_unwindはpanicを捕捉しているはず");
+        assert!(
+            DROPPED.load(Ordering::SeqCst),
+            "スタックアンワインド中でもDropが呼ばれているはず(TerminalGuardが前提としている挙動と同じ)"
+        );
+    }
 
     // 回帰テスト: 疑似端末等で極端に小さい/0の端末サイズが返っても、
     // cols/cell_rows には最低値が保証されること(sim.rs 側の clamp panic の間接的な防止線)。
