@@ -10,8 +10,11 @@
 //        N=水槽選択画面(複数の水槽を名前付きで保存・呼び出し。画面内でnキーで新規水槽名を入力)
 
 mod color;
+mod config;
 mod framebuffer;
 mod fish;
+mod http_api;
+mod i18n;
 mod persist;
 mod rng;
 mod sim;
@@ -202,6 +205,19 @@ fn run() -> std::io::Result<()> {
     let (mut cols_u, mut cell_rows) = sane_size(cols, rows);
     let mut fb = FrameBuffer::new(cols_u, cell_rows);
 
+    // 表示言語(日英切り替え)の決定: ~/.config/aquaterm/config.tomlの
+    // [general] languageの読み込みから始まるあらゆるメッセージ生成
+    // (この後すぐ出てくる「セーブが壊れていた」等のメッセージも含む)より前に
+    // 確定させておく必要があるため、HTTP API設定と合わせてここでconfig.tomlを読む
+    // (config.tomlの読み込み自体は1回で済ませ、HTTP APIサーバーの起動判定にも
+    // このapp_configをそのまま使い回す)。
+    let config_outcome = config::load();
+    let app_config = match &config_outcome {
+        config::ConfigOutcome::Loaded(c) => c.clone(),
+        config::ConfigOutcome::Missing | config::ConfigOutcome::Corrupted => config::Config::default(),
+    };
+    i18n::set_lang(i18n::detect(app_config.general.language.as_deref()));
+
     // シミュレーション初期化: セーブがあれば復元、無ければ初回起動として初期個体+ヘルプ
     let mut sim = Simulation::new(Rng::from_time());
 
@@ -257,13 +273,47 @@ fn run() -> std::io::Result<()> {
             sim.seed_initial(fb.pix_width(), fb.pix_height());
             // 破損したセーブは既に".broken"へ退避済み。黙って新規水槽として
             // 始めるのではなく、その事実をユーザーに見えるようにする。
-            sim.set_message("以前のセーブが壊れていたため.brokenへ退避し、新規水槽として開始しました");
+            sim.set_message(i18n::t(
+                "以前のセーブが壊れていたため.brokenへ退避し、新規水槽として開始しました",
+                "The previous save was corrupted; it was moved to .broken and a new tank was started",
+            ));
         }
     }
 
     // 効果音エンジン: オーディオデバイスが無い/初期化失敗でも SoundEngine::new() 自体は
     // panic せず、以後の play() が静かに無視されるだけになる(内部で握りつぶす)。
     let sound = sound::SoundEngine::new();
+
+    // HTTP API(~/.config/aquaterm/config.tomlの[http]で有効化した場合のみ・
+    // 既定は無効)。ファイルが無い/壊れている場合は既定値(無効・言語は環境変数
+    // からの自動判定)にフォールバックし、TUI自体の起動は妨げない
+    // (config_outcome/app_config自体は上でi18n::set_langより前に読み込み済み)。
+    if matches!(config_outcome, config::ConfigOutcome::Corrupted) {
+        sim.set_message(i18n::t(
+            "config.tomlの読み込みに失敗したため既定値(HTTP無効)で起動しました",
+            "Failed to read config.toml; starting with defaults (HTTP API disabled)",
+        ));
+    }
+    // メインループとHTTPサーバースレッドの間で共有する軽量な状態(詳細はhttp_api.rs
+    // 冒頭のコメント参照)。無効時もdrain/publishをコスト無く呼べるよう常に持つ。
+    let http_shared = http_api::HttpShared::new();
+    if app_config.http.enabled {
+        match http_api::start(&app_config.http, http_shared.clone()) {
+            // サーバースレッドはプロセス終了まで生かしっぱなしにする(明示的なjoin/
+            // shutdown経路は無いが、デーモン的に動かすだけなので実害は無い)。
+            Ok(_handle) => {}
+            Err(e) => {
+                // ポート使用中等でbindに失敗してもTUI自体はクラッシュさせず、
+                // 起動失敗をステータスバーに一言出すだけに留める。
+                let msg = if i18n::is_en() {
+                    format!("Failed to start HTTP API (port {}): {e}", app_config.http.port)
+                } else {
+                    format!("HTTP APIの起動に失敗しました(port {}): {e}", app_config.http.port)
+                };
+                sim.set_message(&msg);
+            }
+        }
+    }
 
     // 起動スプラッシュ(タイトルロゴ)。毎回の起動時に表示し、キー入力か一定時間で消える。
     let mut splash = true;
@@ -297,6 +347,18 @@ fn run() -> std::io::Result<()> {
                 }
             }
         }
+
+        // --- HTTP API: 溜まった操作要求を適用し、最新状態を公開する ---
+        // ヘルプ/スプラッシュ表示中かどうかに関わらず常に処理する(APIから見て
+        // feed/medicateが画面状態次第で無視されるのは分かりにくいため)。
+        // カーソル位置の概念がHTTP側には無いため、投下位置は水槽中央のX座標を使う。
+        for cmd in http_shared.drain_commands() {
+            match cmd {
+                http_api::HttpCommand::Feed => sim.feed(fb.pix_width() as f64 / 2.0, fb.pix_width()),
+                http_api::HttpCommand::Medicate => sim.medicate(fb.pix_width() as f64 / 2.0, fb.pix_width()),
+            }
+        }
+        http_shared.publish_snapshot(http_api::StatusSnapshot::capture(&sim, ctl.paused));
 
         // --- スプラッシュの自動消灯(一定時間経過で消す) ---
         if splash && splash_start.elapsed() >= SPLASH_DURATION {
@@ -463,7 +525,7 @@ fn handle_key(
         if let KeyCode::Char('y') | KeyCode::Char('Y') = code {
             sim.reset(fb.pix_width(), fb.pix_height());
         } else {
-            sim.set_message("リセットを取り消しました");
+            sim.set_message(i18n::t("リセットを取り消しました", "Reset cancelled"));
         }
         return Ok(());
     }
@@ -704,19 +766,22 @@ fn handle_key(
         KeyCode::Char('T') => sim.tap_attract(ctl.cursor_x, ctl.cursor_y, fb.pix_width(), fb.pix_height()),
         KeyCode::Char('p') => {
             ctl.paused = !ctl.paused;
-            sim.set_message(if ctl.paused { "一時停止" } else { "再開" });
+            sim.set_message(i18n::t(
+                if ctl.paused { "一時停止" } else { "再開" },
+                if ctl.paused { "Paused" } else { "Resumed" },
+            ));
         }
         KeyCode::Char('[') => {
             if ctl.speed_idx > 0 {
                 ctl.speed_idx -= 1;
             }
-            sim.set_message(format!("速度 x{}", SPEED_STEPS[ctl.speed_idx]));
+            sim.set_message(format!("{} x{}", i18n::t("速度", "Speed"), SPEED_STEPS[ctl.speed_idx]));
         }
         KeyCode::Char(']') => {
             if ctl.speed_idx < SPEED_STEPS.len() - 1 {
                 ctl.speed_idx += 1;
             }
-            sim.set_message(format!("速度 x{}", SPEED_STEPS[ctl.speed_idx]));
+            sim.set_message(format!("{} x{}", i18n::t("速度", "Speed"), SPEED_STEPS[ctl.speed_idx]));
         }
         KeyCode::Char('R') => {
             ctl.awaiting_reset = true; // 確認プロンプトはステータスバーに出す
@@ -726,11 +791,10 @@ fn handle_key(
             if ctl.overlay_on {
                 sim.sound_events.push(sim::SfxEvent::UiClick);
             }
-            sim.set_message(if ctl.overlay_on {
-                "オーバーレイ表示"
-            } else {
-                "オーバーレイ非表示"
-            });
+            sim.set_message(i18n::t(
+                if ctl.overlay_on { "オーバーレイ表示" } else { "オーバーレイ非表示" },
+                if ctl.overlay_on { "Overlay shown" } else { "Overlay hidden" },
+            ));
         }
         KeyCode::Char('s') => {
             ctl.sfx_on = !ctl.sfx_on;
@@ -744,29 +808,38 @@ fn handle_key(
             if ctl.sfx_on {
                 sim.sound_events.push(sim::SfxEvent::UiClick);
             }
-            sim.set_message(if ctl.sfx_on { "効果音ON" } else { "効果音OFF" });
+            sim.set_message(i18n::t(
+                if ctl.sfx_on { "効果音ON" } else { "効果音OFF" },
+                if ctl.sfx_on { "Sound ON" } else { "Sound OFF" },
+            ));
         }
         KeyCode::Char('a') => {
             ctl.auto_on = !ctl.auto_on;
             if ctl.auto_on {
                 sim.sound_events.push(sim::SfxEvent::UiClick);
             }
-            sim.set_message(if ctl.auto_on {
-                "自動モードON(自動餌やり/投薬/ガラス叩き)"
-            } else {
-                "自動モードOFF"
-            });
+            sim.set_message(i18n::t(
+                if ctl.auto_on { "自動モードON(自動餌やり/投薬/ガラス叩き)" } else { "自動モードOFF" },
+                if ctl.auto_on {
+                    "Auto mode ON (auto feed/medicate/knock)"
+                } else {
+                    "Auto mode OFF"
+                },
+            ));
         }
         KeyCode::Char('A') => {
             ctl.auto_replenish_on = !ctl.auto_replenish_on;
             if ctl.auto_replenish_on {
                 sim.sound_events.push(sim::SfxEvent::UiClick);
             }
-            sim.set_message(if ctl.auto_replenish_on {
-                "自動魚補充ON(通常魚が減ったら自動追加)"
-            } else {
-                "自動魚補充OFF"
-            });
+            sim.set_message(i18n::t(
+                if ctl.auto_replenish_on { "自動魚補充ON(通常魚が減ったら自動追加)" } else { "自動魚補充OFF" },
+                if ctl.auto_replenish_on {
+                    "Auto restock ON (adds fish when numbers drop)"
+                } else {
+                    "Auto restock OFF"
+                },
+            ));
         }
         KeyCode::Char('+') | KeyCode::Char('=') => sim.add_fish(fb.pix_width(), fb.pix_height()),
         KeyCode::Char('S') => sim.add_piranha(fb.pix_width(), fb.pix_height()),
@@ -848,15 +921,30 @@ fn switch_to_existing_tank(sim: &mut Simulation, fb: &FrameBuffer, ctl: &mut Ctl
             sim.ensure_decorative_entities(fb.pix_width(), fb.pix_height());
             ctl.current_tank = name.to_string();
             let _ = persist::save_current_tank_name(name);
-            sim.set_message(format!("水槽「{name}」に切替"));
+            let msg = if i18n::is_en() {
+                format!("Switched to tank \"{name}\"")
+            } else {
+                format!("水槽「{name}」に切替")
+            };
+            sim.set_message(msg);
         }
         persist::LoadOutcome::Corrupted => {
             // 破損したセーブは既に".broken"へ退避済み。黙って諦めるのではなく
             // 何が起きたかをユーザーに見えるようにする(切替自体は行わない)。
-            sim.set_message(format!("水槽「{name}」のセーブが壊れていたため.brokenへ退避しました"));
+            let msg = if i18n::is_en() {
+                format!("The save for tank \"{name}\" was corrupted; it was moved to .broken")
+            } else {
+                format!("水槽「{name}」のセーブが壊れていたため.brokenへ退避しました")
+            };
+            sim.set_message(msg);
         }
         persist::LoadOutcome::Missing => {
-            sim.set_message(format!("水槽「{name}」の読み込みに失敗しました"));
+            let msg = if i18n::is_en() {
+                format!("Failed to load tank \"{name}\"")
+            } else {
+                format!("水槽「{name}」の読み込みに失敗しました")
+            };
+            sim.set_message(msg);
         }
     }
 }
@@ -876,7 +964,12 @@ fn switch_or_create_tank(sim: &mut Simulation, fb: &mut FrameBuffer, ctl: &mut C
     ctl.current_tank = name.to_string();
     let _ = persist::save_named(sim, ctl, name);
     let _ = persist::save_current_tank_name(name);
-    sim.set_message(format!("新規水槽「{name}」を作成"));
+    let msg = if i18n::is_en() {
+        format!("Created new tank \"{name}\"")
+    } else {
+        format!("新規水槽「{name}」を作成")
+    };
+    sim.set_message(msg);
 }
 
 // 魚のスプライト1ピクセルの色に、空腹度(腹ぺこは薄暗く)と病気(まだら・くすみ)を反映
@@ -1811,13 +1904,17 @@ fn draw_status_bar(
 ) -> std::io::Result<()> {
     let content = if ctl.awaiting_reset {
         // 確認プロンプトを最優先で表示
-        " 水槽をリセットしますか?  [y] 実行  /  他のキー 取消 ".to_string()
+        i18n::t(
+            " 水槽をリセットしますか?  [y] 実行  /  他のキー 取消 ",
+            " Reset the tank?  [y] confirm  /  any other key cancels ",
+        )
+        .to_string()
     } else {
         let cap = sim.effective_cap(pix_w, pix_h);
         let t = sim.elapsed as u64;
         let (mm, ss) = (t / 60, t % 60);
         let speed = if ctl.paused {
-            "停止".to_string()
+            i18n::t("停止", "Stopped").to_string()
         } else {
             format!("x{}", SPEED_STEPS[ctl.speed_idx])
         };
@@ -1825,18 +1922,33 @@ fn draw_status_bar(
         // 既存の自動モード(自動餌やり/投薬/ガラス叩き)とは別枠の表示にする
         // (捕食する種ばかりだと魚がいなくなるという指摘への対応の新規トグル)。
         let auto_replenish = if ctl.auto_replenish_on { "ON" } else { "OFF" };
-        let base = format!(
-            " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  補充 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [M]肉餌 [t]コンコン [T]トントン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [A]補充 [+/-]増減 [S]ピラニア [O]タコ [D]タコつぼ [P]水草 [,]設定 [N]水槽 [?]ヘルプ [q]終了 ",
-            sim.fish_count(),
-            cap,
-            sim.sick_count(),
-            sim.food_count(),
-            speed,
-            auto,
-            auto_replenish,
-            mm,
-            ss
-        );
+        let base = if i18n::is_en() {
+            format!(
+                " Fish {}/{}  Sick {}  Food {}  Speed {}  Auto {}  Restock {}  Elapsed {:02}:{:02}   [arrows]aim [f]feed [m]medicate [M]meat [t]knock [T]tap [p]pause [[/]]speed [R]reset [v]overlay [s]SE [a]auto [A]restock [+/-]add/remove [S]piranha [O]octopus [D]dens [P]plants [,]settings [N]tanks [?]help [q]quit ",
+                sim.fish_count(),
+                cap,
+                sim.sick_count(),
+                sim.food_count(),
+                speed,
+                auto,
+                auto_replenish,
+                mm,
+                ss
+            )
+        } else {
+            format!(
+                " 魚 {}/{}  病気 {}  餌 {}  速度 {}  自動 {}  補充 {}  経過 {:02}:{:02}   [矢印]照準 [f]餌 [m]薬 [M]肉餌 [t]コンコン [T]トントン [p]停止 [[/]]速度 [R]初期化 [v]表示 [s]SE [a]自動 [A]補充 [+/-]増減 [S]ピラニア [O]タコ [D]タコつぼ [P]水草 [,]設定 [N]水槽 [?]ヘルプ [q]終了 ",
+                sim.fish_count(),
+                cap,
+                sim.sick_count(),
+                sim.food_count(),
+                speed,
+                auto,
+                auto_replenish,
+                mm,
+                ss
+            )
+        };
         match &sim.message {
             Some(msg) => format!(" {msg}  |{base}"),
             None => base,
@@ -1967,16 +2079,29 @@ fn dex_entries() -> Vec<(&'static str, &'static str, Species)> {
     // ヘルプが縦長すぎて図鑑が見切れるという指摘への対応で、図鑑を複数列の
     // グリッド表示に変更した。列数を確保しやすくするため説明文は短めにしてある
     // (詳しい説明は本文の育成要素の説明側にある)。
-    vec![
-        ("ネオン", "小型・速い", Species::Neon),
-        ("金魚", "大きめ・ゆったり", Species::Goldfish),
-        ("グッピー", "反応が速い", Species::Guppy),
-        ("エンゼルフィッシュ", "縦長で優雅", Species::Angelfish),
-        ("ベタ", "派手なヒレ", Species::Betta),
-        ("ピラニア", "捕食者(Sキー)", Species::Piranha),
-        ("タコ", "捕食者(Oキー)", Species::Octopus),
-        ("クジラ", "巨大・ネタ枠(Wキー)", Species::Whale),
-    ]
+    if i18n::is_en() {
+        vec![
+            ("Neon Tetra", "small, fast", Species::Neon),
+            ("Goldfish", "large, leisurely", Species::Goldfish),
+            ("Guppy", "quick reactions", Species::Guppy),
+            ("Angelfish", "tall, graceful", Species::Angelfish),
+            ("Betta", "flashy fins", Species::Betta),
+            ("Piranha", "predator (S key)", Species::Piranha),
+            ("Octopus", "predator (O key)", Species::Octopus),
+            ("Whale", "giant novelty (W key)", Species::Whale),
+        ]
+    } else {
+        vec![
+            ("ネオン", "小型・速い", Species::Neon),
+            ("金魚", "大きめ・ゆったり", Species::Goldfish),
+            ("グッピー", "反応が速い", Species::Guppy),
+            ("エンゼルフィッシュ", "縦長で優雅", Species::Angelfish),
+            ("ベタ", "派手なヒレ", Species::Betta),
+            ("ピラニア", "捕食者(Sキー)", Species::Piranha),
+            ("タコ", "捕食者(Oキー)", Species::Octopus),
+            ("クジラ", "巨大・ネタ枠(Wキー)", Species::Whale),
+        ]
+    }
 }
 
 // 図鑑が狭い端末で収まらない場合のテキストのみフォールバック行。
@@ -1986,14 +2111,25 @@ fn dex_entries() -> Vec<(&'static str, &'static str, Species)> {
 // のテストで両者の一致を機械的に検証する)。7種類分を1行に収めると幅が長くなりすぎるため、
 // 複数行に分けている。
 fn dex_fallback_lines() -> [&'static str; 6] {
-    [
-        "  種類: ネオン(青) / 金魚(オレンジ) / グッピー(白+差し色)",
-        "        エンゼルフィッシュ(縦長で優雅) / ベタ(派手なヒレ)",
-        "  捕食者: ピラニア(銀色+腹に赤み) / タコ(つぼに隠れ、時々出てくる)",
-        "  特殊: クジラ(ずば抜けて大きいネタ枠・Wキーで追加、捕食も繁殖もしない)",
-        "  観賞用: カニ・エビ(水底を歩く) / タツノオトシゴ(藻の近くを漂う)も泳いでいます",
-        "",
-    ]
+    if i18n::is_en() {
+        [
+            "  Species: Neon Tetra(blue) / Goldfish(orange) / Guppy(white+accent)",
+            "           Angelfish(tall, graceful) / Betta(flashy fins)",
+            "  Predators: Piranha(silver+red belly) / Octopus(hides in a den, comes out sometimes)",
+            "  Special: Whale(a huge novelty species, added with the W key; doesn't hunt or breed)",
+            "  Decorative: Crabs/Shrimp(walk the seabed) / Seahorses(drift near the plants) also swim about",
+            "",
+        ]
+    } else {
+        [
+            "  種類: ネオン(青) / 金魚(オレンジ) / グッピー(白+差し色)",
+            "        エンゼルフィッシュ(縦長で優雅) / ベタ(派手なヒレ)",
+            "  捕食者: ピラニア(銀色+腹に赤み) / タコ(つぼに隠れ、時々出てくる)",
+            "  特殊: クジラ(ずば抜けて大きいネタ枠・Wキーで追加、捕食も繁殖もしない)",
+            "  観賞用: カニ・エビ(水底を歩く) / タツノオトシゴ(藻の近くを漂う)も泳いでいます",
+            "",
+        ]
+    }
 }
 
 // 図鑑1件分の表示に必要な幅(スプライト幅とラベル幅の大きい方)
@@ -2134,31 +2270,53 @@ fn draw_settings_panel(
     let dim_fg = "\x1b[38;2;170;190;205m";
     let selected_fg = "\x1b[38;2;255;230;140m";
 
-    let species_names = ["ネオン", "金魚", "グッピー", "エンゼルフィッシュ", "ベタ"];
+    let species_names: [&str; 5] = if i18n::is_en() {
+        ["Neon Tetra", "Goldfish", "Guppy", "Angelfish", "Betta"]
+    } else {
+        ["ネオン", "金魚", "グッピー", "エンゼルフィッシュ", "ベタ"]
+    };
     let on_off = |on: bool| if on { "ON".to_string() } else { "OFF".to_string() };
-    let mut items: Vec<(String, String)> = vec![
-        ("効果音(SE)".to_string(), on_off(ctl.sfx_on)),
-        ("オーバーレイ表示".to_string(), on_off(ctl.overlay_on)),
-        ("自動モード".to_string(), on_off(ctl.auto_on)),
-        ("昼夜連動".to_string(), on_off(ctl.day_night_on)),
-        ("自動魚補充".to_string(), on_off(ctl.auto_replenish_on)),
-        ("気泡音".to_string(), on_off(ctl.bubble_sfx_on)),
-        ("捕食音".to_string(), on_off(ctl.predation_sfx_on)),
-        ("投下音".to_string(), on_off(ctl.drop_sfx_on)),
-        ("状態通知音".to_string(), on_off(ctl.health_sfx_on)),
-    ];
+    let mut items: Vec<(String, String)> = if i18n::is_en() {
+        vec![
+            ("Sound (SE)".to_string(), on_off(ctl.sfx_on)),
+            ("Overlay".to_string(), on_off(ctl.overlay_on)),
+            ("Auto mode".to_string(), on_off(ctl.auto_on)),
+            ("Day/night".to_string(), on_off(ctl.day_night_on)),
+            ("Auto restock".to_string(), on_off(ctl.auto_replenish_on)),
+            ("Bubble sound".to_string(), on_off(ctl.bubble_sfx_on)),
+            ("Predation sound".to_string(), on_off(ctl.predation_sfx_on)),
+            ("Drop sound".to_string(), on_off(ctl.drop_sfx_on)),
+            ("Health alert sound".to_string(), on_off(ctl.health_sfx_on)),
+        ]
+    } else {
+        vec![
+            ("効果音(SE)".to_string(), on_off(ctl.sfx_on)),
+            ("オーバーレイ表示".to_string(), on_off(ctl.overlay_on)),
+            ("自動モード".to_string(), on_off(ctl.auto_on)),
+            ("昼夜連動".to_string(), on_off(ctl.day_night_on)),
+            ("自動魚補充".to_string(), on_off(ctl.auto_replenish_on)),
+            ("気泡音".to_string(), on_off(ctl.bubble_sfx_on)),
+            ("捕食音".to_string(), on_off(ctl.predation_sfx_on)),
+            ("投下音".to_string(), on_off(ctl.drop_sfx_on)),
+            ("状態通知音".to_string(), on_off(ctl.health_sfx_on)),
+        ]
+    };
     for (i, name) in species_names.iter().enumerate() {
-        items.push((format!("生成:{name}"), on_off(sim.species_toggle[i])));
+        let label = if i18n::is_en() { format!("Spawn:{name}") } else { format!("生成:{name}") };
+        items.push((label, on_off(sim.species_toggle[i])));
     }
     items.push((
-        "餌の量".to_string(),
-        sim::FEED_AMOUNT_LABELS[sim.feed_amount].to_string(),
+        i18n::t("餌の量", "Feed amount").to_string(),
+        sim::feed_amount_label(sim.feed_amount).to_string(),
     ));
-    items.push(("カニ".to_string(), on_off(sim.crab_toggle)));
-    items.push(("個体数上限".to_string(), sim.max_fish_cap_label(pix_w, pix_h)));
+    items.push((i18n::t("カニ", "Crabs").to_string(), on_off(sim.crab_toggle)));
+    items.push((
+        i18n::t("個体数上限", "Fish cap").to_string(),
+        sim.max_fish_cap_label(pix_w, pix_h),
+    ));
 
     let mut lines: Vec<(String, &str)> = Vec::new();
-    lines.push((" 設定".to_string(), fg));
+    lines.push((i18n::t(" 設定", " Settings").to_string(), fg));
     lines.push((String::new(), fg));
     for (i, (label, status)) in items.iter().enumerate() {
         let marker = if i == ctl.settings_selected { "▶" } else { " " };
@@ -2166,10 +2324,17 @@ fn draw_settings_panel(
         lines.push((format!(" {marker}{label}:{status}"), color));
     }
     lines.push((String::new(), fg));
-    lines.push((" ↑↓ 選択".to_string(), dim_fg));
-    lines.push((" Enter/Space 切替".to_string(), dim_fg));
-    lines.push((" ←→ 個体数上限を増減(Shiftで5)".to_string(), dim_fg));
-    lines.push((" Esc 閉じる".to_string(), dim_fg));
+    if i18n::is_en() {
+        lines.push((" up/down select".to_string(), dim_fg));
+        lines.push((" Enter/Space toggle".to_string(), dim_fg));
+        lines.push((" left/right adjust fish cap (Shift for 5)".to_string(), dim_fg));
+        lines.push((" Esc close".to_string(), dim_fg));
+    } else {
+        lines.push((" ↑↓ 選択".to_string(), dim_fg));
+        lines.push((" Enter/Space 切替".to_string(), dim_fg));
+        lines.push((" ←→ 個体数上限を増減(Shiftで5)".to_string(), dim_fg));
+        lines.push((" Esc 閉じる".to_string(), dim_fg));
+    }
 
     for row in 0..rows {
         let (text, color) = lines
@@ -2202,13 +2367,39 @@ fn draw_tank_select_panel(out: &mut Stdout, ctl: &Ctl, cols: usize, rows: usize)
 
     let mut lines: Vec<(String, &str)> = Vec::new();
     if ctl.name_input_on {
-        lines.push((" 新規水槽".to_string(), fg));
+        if i18n::is_en() {
+            lines.push((" New Tank".to_string(), fg));
+            lines.push((String::new(), fg));
+            lines.push((" Enter a name:".to_string(), fg));
+            lines.push((format!(" {}▏", ctl.name_input_buf), selected_fg));
+            lines.push((String::new(), fg));
+            lines.push((" letters, digits, - and _ only".to_string(), dim_fg));
+            lines.push((" Enter confirm / Esc cancel".to_string(), dim_fg));
+        } else {
+            lines.push((" 新規水槽".to_string(), fg));
+            lines.push((String::new(), fg));
+            lines.push((" 名前を入力:".to_string(), fg));
+            lines.push((format!(" {}▏", ctl.name_input_buf), selected_fg));
+            lines.push((String::new(), fg));
+            lines.push((" 英数字・- ・_ のみ使用可".to_string(), dim_fg));
+            lines.push((" Enter 確定 / Esc キャンセル".to_string(), dim_fg));
+        }
+    } else if i18n::is_en() {
+        lines.push((" Select Tank".to_string(), fg));
         lines.push((String::new(), fg));
-        lines.push((" 名前を入力:".to_string(), fg));
-        lines.push((format!(" {}▏", ctl.name_input_buf), selected_fg));
+        if ctl.tank_select_names.is_empty() {
+            lines.push((" (no saved tanks)".to_string(), dim_fg));
+        }
+        for (i, name) in ctl.tank_select_names.iter().enumerate() {
+            let marker = if i == ctl.tank_select_idx { "▶" } else { " " };
+            let current = if name == &ctl.current_tank { " (current)" } else { "" };
+            let color = if i == ctl.tank_select_idx { selected_fg } else { fg };
+            lines.push((format!(" {marker}{name}{current}"), color));
+        }
         lines.push((String::new(), fg));
-        lines.push((" 英数字・- ・_ のみ使用可".to_string(), dim_fg));
-        lines.push((" Enter 確定 / Esc キャンセル".to_string(), dim_fg));
+        lines.push((" up/down select  Enter switch".to_string(), dim_fg));
+        lines.push((" n enter a new tank name".to_string(), dim_fg));
+        lines.push((" Esc close".to_string(), dim_fg));
     } else {
         lines.push((" 水槽選択".to_string(), fg));
         lines.push((String::new(), fg));
@@ -2246,35 +2437,71 @@ fn draw_help(out: &mut Stdout, cols: usize, rows: usize) -> std::io::Result<()> 
     // ヘルプが縦長すぎて図鑑が見切れるという指摘への対応で、キー操作を
     // 詳細な1キー1行から、関連キーをまとめた行に圧縮した(縦の行数を減らし、
     // 図鑑の表示に使える余白を確保するため)。
-    let intro_lines = [
-        "",
-        "  aquaterm — 端末熱帯魚アクアリウム",
-        "",
-        "  魚に餌をやって育てよう。満腹を保つと成長し、まれに産卵→孵化で増えます。",
-        "  空腹が続いたり過密だと病気になります。薬で治療を。長く放置すると力尽きて",
-        "  仰向けに浮き、しばらくして水槽から消えます。",
-        "",
-        "  基本操作:",
-        "    矢印キー  カーソル移動(Shift+矢印で高速)    f / m   餌 / 薬    t / T   コンコン / トントン",
-        "    p  一時停止/再開    [ / ]  速度変更    ,  設定画面    N  水槽選択    ?  ヘルプ    q  終了",
-        "",
-        "  N(水槽選択画面): ↑↓ 選択  Enter 切替(現在の水槽を保存してから読込)  n 新規水槽名を入力  Esc 閉じる",
-        "",
-        "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
-        "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / C 浄化剤 / D タコつぼ / P 水草",
-        "          H 全員空腹に / G 全稚魚を成魚に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
-        "          J 水質トグル / X ランダム死亡 / Z スター投入 / L 寿命残り10秒 / B クジラ即時大爆発(いずれもデバッグ)",
-        "",
-        "  注意: 浄化剤(C)は着水後すぐ水質が下がるが、薄まりきる(約10分)まで",
-        "        通常種の食欲不振・全種の老化加速が続く。連投すると濃度が積み上がり、",
-        "        水が濃い紫に染まって効果も副作用も強まる(100%超でタコ、50%以上で",
-        "        稚魚が死亡するほど強力なので、使いすぎに注意)。水質悪化・浄化剤の",
-        "        濃度が高いままだと、卵が孵化に失敗しやすくなる。",
-        "",
-    ];
+    let intro_lines: Vec<&str> = if i18n::is_en() {
+        vec![
+            "",
+            "  aquaterm — a terminal tropical fish aquarium",
+            "",
+            "  Feed your fish and raise them. Keeping them full makes them grow, and they",
+            "  occasionally lay eggs that hatch into more fish. Prolonged hunger or",
+            "  overcrowding makes them sick — cure them with medicine. Left untreated too",
+            "  long, they die, float belly-up, and eventually vanish from the tank.",
+            "",
+            "  Basic controls:",
+            "    arrows  move cursor (Shift+arrow = fast)    f / m   feed / medicate    t / T   knock / tap",
+            "    p  pause/resume    [ / ]  speed    ,  settings    N  select tank    ?  help    q  quit",
+            "",
+            "  N (tank select screen): up/down select  Enter switch (saves current tank first)  n new tank name  Esc close",
+            "",
+            "  Other: v overlay / s sound / a auto mode / A auto restock / R reset",
+            "         + - add/remove / S piranha / O octopus / W whale / M meat / C purifier / D dens / P plants",
+            "         H starve everyone / G grow all fry to adult (debug)  K instantly pair up mates (debug)",
+            "         J toggle water quality / X random death / Z spawn star / L 10s left to live / B instantly explode whale (all debug)",
+            "",
+            "  Note: the purifier (C) drops water quality right away, and until it fully",
+            "        dilutes (~10 min) normal species lose appetite and all species age",
+            "        faster. Repeated doses stack up the concentration, turning the water",
+            "        deep purple and intensifying both the effect and side effects (strong",
+            "        enough to kill an octopus above 100% or fry above 50%, so don't",
+            "        overdo it). High water pollution/purifier concentration also makes",
+            "        eggs more likely to fail to hatch.",
+            "",
+        ]
+    } else {
+        vec![
+            "",
+            "  aquaterm — 端末熱帯魚アクアリウム",
+            "",
+            "  魚に餌をやって育てよう。満腹を保つと成長し、まれに産卵→孵化で増えます。",
+            "  空腹が続いたり過密だと病気になります。薬で治療を。長く放置すると力尽きて",
+            "  仰向けに浮き、しばらくして水槽から消えます。",
+            "",
+            "  基本操作:",
+            "    矢印キー  カーソル移動(Shift+矢印で高速)    f / m   餌 / 薬    t / T   コンコン / トントン",
+            "    p  一時停止/再開    [ / ]  速度変更    ,  設定画面    N  水槽選択    ?  ヘルプ    q  終了",
+            "",
+            "  N(水槽選択画面): ↑↓ 選択  Enter 切替(現在の水槽を保存してから読込)  n 新規水槽名を入力  Esc 閉じる",
+            "",
+            "  その他: v オーバーレイ / s 効果音 / a 自動モード / A 自動魚補充 / R リセット",
+            "          + - 追加/間引き / S ピラニア / O タコ / W クジラ / M 肉餌 / C 浄化剤 / D タコつぼ / P 水草",
+            "          H 全員空腹に / G 全稚魚を成魚に(デバッグ)  K つがいを即座に交尾させる(デバッグ)",
+            "          J 水質トグル / X ランダム死亡 / Z スター投入 / L 寿命残り10秒 / B クジラ即時大爆発(いずれもデバッグ)",
+            "",
+            "  注意: 浄化剤(C)は着水後すぐ水質が下がるが、薄まりきる(約10分)まで",
+            "        通常種の食欲不振・全種の老化加速が続く。連投すると濃度が積み上がり、",
+            "        水が濃い紫に染まって効果も副作用も強まる(100%超でタコ、50%以上で",
+            "        稚魚が死亡するほど強力なので、使いすぎに注意)。水質悪化・浄化剤の",
+            "        濃度が高いままだと、卵が孵化に失敗しやすくなる。",
+            "",
+        ]
+    };
     // 図鑑が狭い端末で収まらない場合のテキストのみフォールバック行
     let dex_fallback = dex_fallback_lines();
-    let outro_lines = ["  何かキーを押すと水槽に戻ります。", ""];
+    let outro_lines = if i18n::is_en() {
+        ["  Press any key to return to the tank.", ""]
+    } else {
+        ["  何かキーを押すと水槽に戻ります。", ""]
+    };
 
     queue!(out, Clear(ClearType::All))?;
     // ロゴを先頭(上端)に表示し、収まらない端末ではスキップして本文だけ表示する

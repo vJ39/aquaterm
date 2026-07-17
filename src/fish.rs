@@ -665,7 +665,9 @@ impl Sprite {
                 "FF...BBB......",
             ],
             (Species::Goldfish, Stage::Fry) => &[
-                "..FFFF..",
+                "....F...",
+                "...FFF..",
+                "..FFFFF.",
                 ".BBBBBB.",
                 "<BBBBBBE",
                 ".BBBBBB.",
@@ -680,8 +682,19 @@ impl Sprite {
             // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体専用の、BIG_ADULTより
             // さらに一段精細なパターン(Neonと同じ約1.22倍・行列を増やしただけで
             // シルエット自体は変えていない)。
+            // 金魚の背側に大きく目立つ背びれが無い(体の輪郭がただの卵形に
+            // なっている)との再指摘を受けて、3段階(通常/BIG/MAX)全てに
+            // 背中側だけ盛り上がる三角形の背びれを追加した(2026/07/17)。
+            // 背びれは体の中央よりやや尾寄り(左寄り)から立ち上がる構成にし、
+            // 腹側はあえて何も足さない(背だけ尖る非対称な輪郭にすることで、
+            // 上下対称だった旧シルエットを崩している)。
             (Species::Goldfish, Stage::Adult) if growth_stage >= MAX_ADULT_GROWTH_STAGE => &[
-                "......FFFFF...............",
+                "..........F...............",
+                ".........FFF..............",
+                "........FFFFF.............",
+                ".......FFFFFFF............",
+                "......FFFFFFFFF...........",
+                ".....FFFFFFFFFFF..........",
                 "....FFFFFBBBBBBBB.........",
                 "..FFFFBBBBBBBBBBBBBB......",
                 "..FFFFBBBBBBBBBBBBBB......",
@@ -701,8 +714,13 @@ impl Sprite {
             // 左に扇状の尾びれ(F)、丸みのある卵形の体(B)、右の目(E)という
             // 金魚らしいシルエットはそのままに、腹のアクセント(A)を一回り
             // 大きくして拡大表示でも見えるようにした。
+            // 背びれ追加(2026/07/17、理由は上のMAX_ADULT側コメント参照)。
             (Species::Goldfish, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
-                ".....FFFF............",
+                "........F............",
+                ".......FFF...........",
+                "......FFFFF..........",
+                ".....FFFFFFF.........",
+                "....FFFFFFFFF........",
                 "...FFFFBBBBBBB.......",
                 "..FFFBBBBBBBBBBB.....",
                 ".FFBBBBBBBBBBBBBBB...",
@@ -716,7 +734,9 @@ impl Sprite {
                 ".....FFFF............",
             ],
             (Species::Goldfish, Stage::Adult) => &[
-                "......FF........",
+                ".......F........",
+                "......FFF.......",
+                ".....FFFFF......",
                 "....FFBBBB......",
                 "...FBBBBBBBB....",
                 "..FBBBBBBBBBBB..",
@@ -792,21 +812,31 @@ impl Sprite {
             // 背びれをA(赤)からF(ヒレ色)に変更し、体の広範囲を覆っていた赤を
             // 頭側の腹(のど元)に絞ることで、「銀色の体+腹に赤みのアクセント」を
             // 誇張しすぎない配色に修正した(赤が多すぎると金魚のように見えてしまう)。
+            // さらに再確認したところ、尾側(左端・低dx)に尾びれの表現が一切無く
+            // 体が丸まっただけで終わっていた点と、実物の特徴である「体下側後方に
+            // 大きく発達する臀びれ」が色パッチだけで輪郭として突き出していない点が
+            // 不足していたため追加修正(2026/07/17)。尾側は左端の列(元々全行が
+            // 空だった)にヒレ色(F)を上下2箇所だけ置き、中間の行は空けたままに
+            // することで浅いY字の尾びれの叉に見えるようにした。臀びれは既存の
+            // 腹アクセントのすぐ下に、ヒレ色(F)で輪郭の外へ突き出す1行を足して
+            // 独立した鰭として読めるようにした。
             (Species::Piranha, Stage::Fry) => &[
                 ".....FF...",
-                ".BBBBBBBB.",
+                "FBBBBBBBB.",
                 ".BBBBBBBB<",
-                ".BBBBBBBBE",
+                "FBBBBBBBBE",
                 ".BBB.AAA<F",
+                "....FF....",
             ],
             (Species::Piranha, Stage::Adult) => &[
                 "......FF......",
-                ".BB..BBBB.....",
+                "FBB..BBBB.....",
                 "..BBBBBBBBB...",
                 ".BBBBBBBBBBB<.",
                 ".BBBBBBBBBBBBE",
-                ".BBB..AAAAAB<F",
+                "FBBB..AAAAAB<F",
                 "....BBAAABB...",
+                ".....FFFFF....",
             ],
             (Species::Angelfish, Stage::Fry) => &[
                 "..FF..",
@@ -896,63 +926,74 @@ impl Sprite {
                 ".....FFFF.....",
                 "......FF......",
             ],
+            // ベタが「左右対称の丸い塊」で魚に見えないという指摘を受けて描き直した
+            // (2026/07/17)。実物のベタは体そのものは小さな涙滴形(頭側が細く
+            // すぼまり、体幹がふくらみ、尾の付け根でまた細く括れる)で、そこから
+            // 尾びれ・背びれ・尻びれが体より大きく伸びて後方でひと続きの扇状に
+            // 融合する。そのため輪郭全体を「右側(頭)は小さくすぼまり、左側
+            // (尾側)へ向かって大きく扇状に広がる」非対称な形にした。頭側の
+            // 涙滴ボディはFry含め維持し、体の中心軸から尾の付け根(1ドットの
+            // くびれ)を経て左側全体に大きなヒレ(F)を面で広げる。腹のアクセント
+            // (A)は既存どおり小さな一点に絞って残す。
             (Species::Betta, Stage::Fry) => &[
-                "..FF...",
-                ".BBBBF.",
-                "<BABBFE",
-                ".BBBBF.",
-                "..FF...",
+                "FF......",
+                "FFF.BBB.",
+                "<FFBABEB",
+                "FFF.BBB.",
+                "FF......",
             ],
-            // ベタの見た目が種の特徴を捉えられていなかったとの指摘を受けて描き直した。
-            // 旧パターンは体の中心にaccent(紫)が3行×3列の四角い塊として居座り、
-            // 「窓」や「機械のパネル」のように見えていた。accentは腹の小さな
-            // 一点だけに絞り、色も紫からベタらしい赤+青の対比に変更した
-            // (パレット側のaccentも参照)。周囲のヒレ(F)はそのまま活かし、
-            // 「体は小さく、ヒレが大きく優雅に広がる」印象を保つ。
             // 完全に成長しきった(MAX_ADULT_GROWTH_STAGE)個体専用の、BIG_ADULTより
-            // さらに一段精細なパターン(Neonと同じ約1.22倍・行列を増やしただけで
-            // シルエット自体は変えていない)。
+            // さらに一段精細なパターン。下のAdult(基準形)を単純拡大したのではなく、
+            // 同じ列ごとの輪郭(頭のすぼまり→体幹のふくらみ→尾の付け根のくびれ→
+            // 扇状のヒレ)を高解像度で引き直したもので、成長段階が変わってもシル
+            // エットの一貫性を保っている。
             (Species::Betta, Stage::Adult) if growth_stage >= MAX_ADULT_GROWTH_STAGE => &[
-                "........FFFFFF..........",
-                "......FFFFFFFFFFF.......",
-                "....FFFBBBBBBBBBBFF.....",
-                "....FFFBBBBBBBBBBFF.....",
-                "..FFFBBBBBBBBBBBBBBFFF..",
-                ".FFFBBBBBBBBBBBBBBBBFFF.",
-                "<FFFBBBBBBBAABBBBBBBFFFE",
-                ".FFFBBBBBBBBBBBBBBBBFFF.",
-                "..FFFBBBBBBBBBBBBBBFFF..",
-                "....FFFBBBBBBBBBBFF.....",
-                "....FFFBBBBBBBBBBFF.....",
-                "......FFFFFFFFFFF.......",
-                ".......FFFF..FFFF.......",
+                "FFFFFFFFFF..................",
+                "FFFFFFFFFF..................",
+                "FFFFFFFFFFF........BBBBB....",
+                "FFFFFFFFFFF........BBBBB....",
+                "FFFFFFFFFFFFF.....BBBBBBB...",
+                "FFFFFFFFFFFFFF..BBBBBBBBBBB.",
+                "FFFFFFFFFFFFFF..BBBBBBBBBBB.",
+                "<<FFFFFFFFFFFFBBBBBBBBBBBEEB",
+                "FFFFFFFFFFFFFF..BBBBBAAABBB.",
+                "FFFFFFFFFFFFFF..BBBBBAAABBB.",
+                "FFFFFFFFFFFFF.....BBBBBBB...",
+                "FFFFFFFFFFF........BBBBB....",
+                "FFFFFFFFFFF........BBBBB....",
+                "FFFFFFFFFF..................",
             ],
-            // BIG_ADULT_GROWTH_STAGE以降は高解像度の専用パターンに切り替える。
-            // ベタの見どころは大きく優雅に広がるヒレ(F)なので、上下・周囲に
-            // 流れるヒレを一回り大きく描き、体(B)は中庸に、中央のアクセント(A)は
-            // 控えめな一点のまま保つ。左に尾(<)、右に目(E)。
+            // BIG_ADULT_GROWTH_STAGE以降の高解像度パターン。基準形(Adult)と同じ
+            // 列構成をひと回り精細に引き直しただけで、頭のすぼまり・体幹の
+            // ふくらみ・尾の付け根のくびれ・扇状のヒレという構図はそのまま。
             (Species::Betta, Stage::Adult) if growth_stage >= BIG_ADULT_GROWTH_STAGE => &[
-                ".......FFFFF........",
-                ".....FFFFFFFFF......",
-                "...FFFBBBBBBBBFF....",
-                "..FFBBBBBBBBBBBBFF..",
-                ".FFBBBBBBBBBBBBBBFF.",
-                "<FFBBBBBBAABBBBBBFFE",
-                ".FFBBBBBBBBBBBBBBFF.",
-                "..FFBBBBBBBBBBBBFF..",
-                "...FFFBBBBBBBBFF....",
-                ".....FFFFFFFFF......",
-                "......FFF..FFF......",
+                "FFFFFFFF................",
+                "FFFFFFFF................",
+                "FFFFFFFFFF......BBBB....",
+                "FFFFFFFFFFF....BBBBBBB..",
+                "FFFFFFFFFFFF..BBBBBBBBB.",
+                "FFFFFFFFFFFF..BBBBBBBBB.",
+                "<<FFFFFFFFFFBBBBBBBBBBEB",
+                "FFFFFFFFFFFF..BBBBAABBB.",
+                "FFFFFFFFFFF....BBBBBBB..",
+                "FFFFFFFFFFF....BBBBBBB..",
+                "FFFFFFFFFF......BBBB....",
+                "FFFFFFFF................",
             ],
+            // 基準形。右側(頭)は細くすぼまる小さな涙滴ボディ、尾の付け根
+            // (体幹右端、列9)で1ドットまでくびれてから、左側全体に扇状の
+            // ヒレ(F)が大きく広がる。腹の小さな一点にアクセント(A)を置く。
+            // 左に尾の目印(<)、右に目(E)。
             (Species::Betta, Stage::Adult) => &[
-                "......FFFF......",
-                "....FBBBBBFF....",
-                "..FFBBBBBBBBFF..",
-                "<FFBBBBAABBBBBFE",
-                "..FFBBBBBBBBFF..",
-                "....FBBBBBFF....",
-                "......FFFF......",
-                "......FF.FF.....",
+                "FFFFFF............",
+                "FFFFFFF.....BBB...",
+                "FFFFFFFF...BBBBB..",
+                "FFFFFFFFF.BBBBBBB.",
+                "<FFFFFFFFBBBBBBBEB",
+                "FFFFFFFFF.BBBAABB.",
+                "FFFFFFFF...BBBBB..",
+                "FFFFFFF.....BBB...",
+                "FFFFFF............",
             ],
             // 提示された具体的なドット絵パターンを元に描き直した。
             // 頭部(丸いドーム型のマント)+大きめの目を左右に、そこから連続して
@@ -1119,12 +1160,19 @@ impl Sprite {
             ],
             (Species::Goldfish, Stage::Fry) => &[
                 "........",
+                "........",
+                "........",
                 ".BBBBBB.",
                 "<BBBBBBE",
                 ".BBBBBB.",
                 "..FFFF..",
             ],
+            // 泳ぎ姿に背びれを追加した(2026/07/17)ぶん、横倒れ側も高さを揃える。
+            // 背びれの3行は背側(上半分)にしかないヒレなので、既存の変換規則
+            // どおりそのまま消して空行にする(以降の行は元のまま無変更)。
             (Species::Goldfish, Stage::Adult) => &[
+                "................",
+                "................",
                 "................",
                 "......BBBB......",
                 "....BBBBBBBB....",
@@ -1177,32 +1225,43 @@ impl Sprite {
                 ".....FFFF.....",
                 "......FF......",
             ],
+            // ベタも新しい非対称シルエット(頭のすぼまり→体幹→尾の付け根の
+            // くびれ→扇状のヒレ)に合わせて描き直した。既存の変換規則どおり、
+            // 背側(上半分)の行のヒレ(F)だけを取り除き、目(E)・尾(<)のある
+            // 中央行と腹側(下半分)はそのまま残す。
             (Species::Betta, Stage::Fry) => &[
-                ".......",
-                ".BBBB..",
-                "<BABBFE",
-                ".BBBBF.",
-                "..FF...",
+                "........",
+                "....BBB.",
+                "<FFBABEB",
+                "FFF.BBB.",
+                "FF......",
             ],
             (Species::Betta, Stage::Adult) => &[
-                "................",
-                ".....BBBBB......",
-                "....BBBBBBBB....",
-                "<FFBBBBAABBBBBFE",
-                "..FFBBBBBBBBFF..",
-                "....FBBBBBFF....",
-                "......FFFF......",
-                "......FF.FF.....",
+                "..................",
+                "............BBB...",
+                "...........BBBBB..",
+                "..........BBBBBBB.",
+                "<FFFFFFFFBBBBBBBEB",
+                "FFFFFFFFF.BBBAABB.",
+                "FFFFFFFF...BBBBB..",
+                "FFFFFFF.....BBB...",
+                "FFFFFF............",
             ],
             // ピラニアは既存5種と同じ標準的な魚型の構図なので、同じ変換規則
             // (背側の行のヒレ('F')だけを'.'に置き換え、目('E')のある行以降は
             // そのまま残す)をそのまま適用して描き直した。
+            // 泳ぎ姿に尾びれの叉(尾側先端のF)と臀びれ(下端のF)を追加した
+            // (2026/07/17)ぶん、横倒れ側も同じ変換規則で描き直す。尾側先端の
+            // 上側ロブ(背側寄り)はヒレなので消し、目のある行自体はそのまま
+            // 残し(そこにあるヒレ色も維持)、下側ロブ・臀びれは腹側なので
+            // そのまま残す。
             (Species::Piranha, Stage::Fry) => &[
                 "..........",
                 ".BBBBBBBB.",
                 ".BBBBBBBB<",
-                ".BBBBBBBBE",
+                "FBBBBBBBBE",
                 ".BBB.AAA<F",
+                "....FF....",
             ],
             (Species::Piranha, Stage::Adult) => &[
                 "..............",
@@ -1210,8 +1269,9 @@ impl Sprite {
                 "..BBBBBBBBB...",
                 ".BBBBBBBBBBB<.",
                 ".BBBBBBBBBBBBE",
-                ".BBB..AAAAAB<F",
+                "FBBB..AAAAAB<F",
                 "....BBAAABB...",
+                ".....FFFFF....",
             ],
             // タコは放射状に足が伸びる特殊な体型で、他種のような「背側のヒレを
             // 消す」規則は当てはまらない(そもそもヒレ('F')を使っていない)。

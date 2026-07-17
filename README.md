@@ -54,6 +54,7 @@ cargo run --release --no-default-features
 - ratatui を使わない自前ハーフブロック・差分レンダリング
 - 終了時に状態を保存し、次回起動時に続きから再開
 - 複数の水槽を名前付きで保存し、`N`キーの選択画面から切り替えられる
+- 日本語/英語のUI切り替え、外部から状態取得・餌やりができるローカルHTTP API(いずれも既定OFF、`config.toml`で設定)
 
 ## Controls
 
@@ -151,13 +152,34 @@ sudo apt install libasound2-dev pkg-config
 
 保存は一時ファイル経由の書き込み+リネームで行われ、保存中にプロセスが落ちても既存のセーブファイルが壊れた状態で残ることはありません。読み込み時にファイルが破損している(存在するが解析に失敗する)場合は、黙って新規水槽として初期化するのではなく元のファイルを`.broken`へ退避したうえで、その旨を画面上の一言メッセージで通知します。
 
+## Configuration
+
+`~/.config/aquaterm/config.toml`(無くても既定値で動作します):
+
+```toml
+[general]
+language = "en"   # "ja" または "en"。未指定なら環境変数 LANG から自動判定(判定できなければ日本語)
+
+[http]
+enabled = true    # ローカルHTTP APIを起動するか(既定false)
+port = 7887       # 待受ポート
+```
+
+HTTP APIはループバック(127.0.0.1)限定・認証無しです(個人用途の想定。外部公開はしないでください)。
+
+| メソッド/パス | 内容 |
+|---|---|
+| `GET /status` | `fish_count`/`sick_count`/`avg_hunger`/`elapsed_secs`/`paused` をJSONで返す(read-only) |
+| `POST /feed` | `f`キー相当の餌やりをトリガー |
+| `POST /medicate` | `m`キー相当の投薬をトリガー |
+
 ## Development
 
 ```sh
 cargo test
 ```
 
-376 unit tests cover:
+398 unit tests cover:
 
 - 空腹度・成長・病気・繁殖・寿命
 - ピラニア・タコの捕食と逃走行動

@@ -17,6 +17,13 @@ rodio = { version = "0.22", default-features = false, features = ["playback"], o
 # 昼夜連動の照明変化: システムのローカル時刻(時)を取得するためだけに使う
 # (default-features = false + clock のみで、シリアライズ等の余分な機能は入れない)。
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+# HTTP API(ローカルループバックのみ・新規): 依存を増やしたくないため、素朴な
+# ブロッキングHTTPサーバーであるtiny_httpを使う(tokio等の非同期ランタイムは
+# 不要)。詳細はsrc/http_api.rs冒頭のコメント参照。
+tiny_http = "0.12"
+# HTTP APIの起動設定(~/.config/aquaterm/config.toml)の読み込み用。
+# 詳細はsrc/config.rs参照。
+toml = "1"
 
 [features]
 default = ["sound"]
